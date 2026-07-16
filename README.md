@@ -9,6 +9,10 @@ component core, with a full DIF/VIF/VIFE record dump instead of built-in per-met
 > meter. Everything else (C1 Format B, T1, SX126x/SX127x, wired UART) is implemented but not yet validated
 > against real hardware — see [Supported Transports](#supported-transports--validation-status) below.
 
+Please do me a favor: :thumbsup: If you use any information or code you find here, please link back to this page.
+:star: Also, please consider to star this project. I really like to keep track of who is using this to do creative things, especially if you are from other parts of the world.
+:smiley: You are welcome to open an issue to report on your personal success project and share it with others.
+
 ## Design Philosophy
 
 Other (w)M-Bus options exist for ESPHome; this one is built around a few specific choices:
