@@ -177,13 +177,19 @@ Illustrative example, in the shape the real log lines take, for the WaterStarM m
 `DWZ`) this component was first validated against:
 
 ```text
+[D][mbus:047]: Received mode C frame with format A: bytes=194 expected=194 l=169 rssi=-80 lqi=51 dFreq=80933
+[D][mbus:080]: Block-1: L=169 C=0x44 M=DWZ ID=0x12345678 Version=0x02 DevType=0x07
+[D][mbus:083]: CRC: OK, stripped frame bytes=170
+[D][mbus:157]: AppHeader: CI=0x7A AccessNr=189 Status=0x00 Config=0x9025 EncMode=5 EncBlocks=9 Encrypted=yes
+[D][mbus:167]: Encrypted payload: offset=15 bytes=144
+[D][mbus:191]: Decryption: OK, decrypted payload bytes=144
 [D][mbus:118]: Record: dif=0x04 vif=0x13 storage=0 tariff=0 subunit=0 function=instantaneous pos=8 vif_raw=0x13 dife=[] vife=[] data_type=int32 raw=A7.BF.01.00 raw_value=114599; decoded: scale=0.001 unit=m3 value=114.599
 [D][mbus:118]: Record: dif=0x44 vif=0x13 storage=1 tariff=0 subunit=0 function=instantaneous pos=14 vif_raw=0x13 dife=[] vife=[0x3C] data_type=int32 raw=0C.00.00.00 flags=backward_flow raw_value=12; decoded: scale=0.001 unit=m3 value=0.012
 [D][mbus:118]: Record: dif=0x04 vif=0x6D storage=0 tariff=0 subunit=0 function=instantaneous pos=20 vif_raw=0x6D dife=[] vife=[] data_type=datetime_type_f raw=1E.0E.0F.33; decoded: value=2024-03-15T14:30
 [D][mbus:118]: Record: dif=0x02 vif=0x7D storage=0 tariff=0 subunit=0 function=instantaneous pos=26 vif_raw=0xFD vif_ext=0x7D17 dife=[] vife=[] data_type=int16 raw=50.00 raw_value=80; decoded: scale=1 unit=flags value=80
 ```
 
-The first line, for example, turns directly into:
+The first record line, for example, turns directly into:
 
 ```yaml
 sensor:
@@ -201,7 +207,7 @@ sensor:
       - multiply: 0.001  # matches "decoded: scale=0.001" from the dump
 ```
 
-The fourth line, with its `vif_ext=0x7D17` flags/status word, turns into a `binary_sensor:` picking out
+The fourth record line, with its `vif_ext=0x7D17` flags/status word, turns into a `binary_sensor:` picking out
 one bit — `raw_value=80` is `0b01010000`, so bit 4 is set:
 
 ```yaml
