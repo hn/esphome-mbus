@@ -45,14 +45,6 @@ The `mbus` component picks exactly one source per instance (`radio_cc1101_id`, `
 `radio_sx127x_id`, or `wired_uart_id`); multiple `mbus:` instances are supported (e.g. several meters on
 one link). See [`components/mbus`](components/mbus) for the implementation.
 
-## Installation
-
-```yaml
-external_components:
-  - source: github://hn/esphome-mbus@main
-    components: [mbus, cc1101]  # drop cc1101 once it's no longer needed, see below
-```
-
 ## The bundled `cc1101` copy
 
 This repository temporarily vendors a patched copy of ESPHome core's `cc1101` component, under
@@ -89,10 +81,8 @@ vendored copy remains the way to get long-packet RX support.
 
 ```yaml
 external_components:
-  - source:
-      type: local
-      path: components
-    components: [cc1101, mbus]
+  - source: github://hn/esphome-mbus@main
+    components: [mbus, cc1101]  # drop cc1101 once it's no longer needed, see above
 
 spi:
   clk_pin: GPIOXX
