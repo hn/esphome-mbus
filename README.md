@@ -73,7 +73,7 @@ vendored copy remains the way to get long-packet RX support.
 | CC1101, wM-Bus C1 Format A | Yes | Yes (WaterStarM water meter) |
 | CC1101, wM-Bus C1 Format B | Yes | No (host-side/synthetic test vectors only) |
 | CC1101, wM-Bus T1 | Yes | No (host-side/synthetic test vectors only) |
-| SX126x / SX127x, wM-Bus C1/T1 | Yes (shares the CC1101 code path via ESPHome core radio listeners) | No |
+| SX126x / SX127x, wM-Bus C1/T1 | Yes (shares the CC1101 code path via ESPHome core radio listeners), but capped at 64-byte packets — see below | No |
 | Wired M-Bus over UART | Yes | No |
 | TCP (M-Bus/wM-Bus gateway) | No, conceptual only, not committed to | — |
 
@@ -119,6 +119,11 @@ sensor:
 
 Instead of `radio_cc1101_id`, you can use `radio_sx126x_id` or `radio_sx127x_id` with a configured
 `sx126x`/`sx127x` radio component.
+
+Core `sx126x`/`sx127x` have the same 64-byte packet cap that `cc1101` had, but no equivalent long-packet
+patch exists for them here (or upstream) yet. Most wM-Bus telegrams exceed 64 bytes, so the `mbus` code
+path for these radios is implemented and wired up, but likely can't receive full telegrams in practice
+until a similar patch is written for them too.
 
 ### Wired M-Bus Example
 
