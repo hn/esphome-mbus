@@ -1,11 +1,11 @@
 #include "mbus.h"
+#include "wmbus_frame_codec.h"
 
 #include "esphome/core/log.h"
 
 namespace esphome::mbus {
 
 static const char *const TAG = "mbus";
-static constexpr uint8_t WMBUS_MODE_C_PREFIX = 0x54;
 
 void MBusComponent::setup() {
 #ifdef USE_MBUS_CC1101
@@ -137,7 +137,7 @@ void MBusComponent::process_radio_packet_(const PendingRadioPacket &pending) {
     return;
   }
 
-  if (packet[0] == WMBUS_MODE_C_PREFIX) {
+  if (packet[0] == wmbus_frame_codec::WMBUS_MODE_C_PREFIX) {
     this->parse_c_mode_(packet, pending.meta);
   } else {
     this->parse_t_mode_(packet, pending.meta);

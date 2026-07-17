@@ -132,12 +132,15 @@ cc1101:
   packet_mode: true
   packet_length: 0
   packet_length_lambda: |-
-    if (x.size() < 2) return 0;
-    if (x[0] != 0x54 || x[1] != 0xCD) return -1;
-    if (x.size() < 3) return 0;
-    const uint8_t l = x[2];
-    const uint8_t blocks = (l < 26) ? 2 : ((l - 26) / 16 + 3);
-    return l + 1 + 2 * blocks + 2;
+    return esphome::mbus::wmbus_frame_codec::expected_packet_length(x);
+    // Equivalent hand-written logic, restricted to C1 Format A only, in case you want to
+    // write your own variant (e.g. to support a protocol variant this helper doesn't cover):
+    // if (x.size() < 2) return 0;
+    // if (x[0] != 0x54 || x[1] != 0xCD) return -1;
+    // if (x.size() < 3) return 0;
+    // const uint8_t l = x[2];
+    // const uint8_t blocks = (l < 26) ? 2 : ((l - 26) / 16 + 3);
+    // return l + 1 + 2 * blocks + 2;
   on_packet:
     then:
       - lambda: |-

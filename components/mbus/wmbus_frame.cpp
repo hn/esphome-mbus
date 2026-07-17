@@ -8,8 +8,6 @@ namespace esphome::mbus {
 
 static const char *const TAG = "mbus";
 
-static constexpr uint8_t WMBUS_FRAME_A_PREFIX = 0xCD;
-static constexpr uint8_t WMBUS_FRAME_B_PREFIX = 0x3D;
 static constexpr size_t MBUS_DLL_HEADER_LENGTH = 10;
 
 void MBusComponent::parse_c_mode_(const std::vector<uint8_t> &packet, const MBusReceiveMeta &meta) {
@@ -20,9 +18,9 @@ void MBusComponent::parse_c_mode_(const std::vector<uint8_t> &packet, const MBus
   }
 
   WMBusFrameFormat format = WMBusFrameFormat::UNKNOWN;
-  if (packet[1] == WMBUS_FRAME_A_PREFIX) {
+  if (packet[1] == wmbus_frame_codec::WMBUS_FRAME_A_PREFIX) {
     format = WMBusFrameFormat::A;
-  } else if (packet[1] == WMBUS_FRAME_B_PREFIX) {
+  } else if (packet[1] == wmbus_frame_codec::WMBUS_FRAME_B_PREFIX) {
     format = WMBusFrameFormat::B;
   } else {
     ESP_LOGD(TAG, "Ignoring C-mode packet with unknown frame marker: marker=0x%02X bytes=%u", packet[1],

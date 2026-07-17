@@ -9,6 +9,12 @@ namespace esphome::mbus::wmbus_frame_codec {
 
 static constexpr uint16_t WMBUS_CRC_POLY = 0x3D65;
 
+// First byte of a mode C over-the-air packet; anything else is treated as mode T (no such fixed prefix,
+// already 3-of-6 encoded from the first byte).
+static constexpr uint8_t WMBUS_MODE_C_PREFIX = 0x54;
+static constexpr uint8_t WMBUS_FRAME_A_PREFIX = 0xCD;
+static constexpr uint8_t WMBUS_FRAME_B_PREFIX = 0x3D;
+
 inline uint16_t crc16_en13757(const uint8_t *data, size_t length) {
   uint16_t crc = 0;
   for (size_t i = 0; i < length; i++) {
@@ -211,6 +217,48 @@ inline bool decode_3of6_first_byte(const uint8_t *data, size_t length, uint8_t *
   }
   *out = decoded[0];
   return true;
+}
+
+// Computes the total over-the-air packet length (in raw radio bytes, as seen by a growing receive
+// buffer) for a wM-Bus mode C (format A or B) or mode T packet, from the bytes received so far.
+// Meant to be used directly as a cc1101/sx126x/sx127x `packet_length_lambda`: returns 0 while more
+// bytes are needed to know the length, -1 if the bytes received so far can't be a valid wM-Bus packet,
+// or the total expected packet length once it's known.
+inline int32_t expected_packet_length(const std::vector<uint8_t> &x) {
+  if (x.empty()) {
+    return 0;
+  }
+  if (x[0] == WMBUS_MODE_C_PREFIX) {
+    if (x.size() < 2) {
+      return 0;
+    }
+    if (x[1] != WMBUS_FRAME_A_PREFIX && x[1] != WMBUS_FRAME_B_PREFIX) {
+      return -1;
+    }
+    if (x.size() < 3) {
+      return 0;
+    }
+    const uint8_t l_field = x[2];
+    const size_t body_length = x[1] == WMBUS_FRAME_A_PREFIX ? packet_len_frame_a(l_field) : packet_len_frame_b(l_field);
+    if (body_length == 0) {
+      return -1;
+    }
+    return static_cast<int32_t>(body_length + 2);
+  }
+
+  // Mode T: no fixed prefix byte, the stream is 3-of-6 encoded from the start.
+  if (x.size() < 2) {
+    return 0;
+  }
+  uint8_t l_field = 0;
+  if (!decode_3of6_first_byte(x.data(), x.size(), &l_field)) {
+    return -1;
+  }
+  const size_t body_length = packet_len_frame_a(l_field);
+  if (body_length == 0) {
+    return -1;
+  }
+  return static_cast<int32_t>(encoded_size_3of6(body_length));
 }
 
 }  // namespace esphome::mbus::wmbus_frame_codec
