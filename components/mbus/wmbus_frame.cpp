@@ -29,7 +29,6 @@ void MBusComponent::parse_c_mode_(const std::vector<uint8_t> &packet, const MBus
   }
 
   const uint8_t *frame = packet.data() + 2;
-  const size_t frame_length = packet.size() - 2;
   const uint8_t l_field = frame[0];
   const size_t expected =
       format == WMBusFrameFormat::A ? this->packet_len_frame_a_(l_field) + 2 : this->packet_len_frame_b_(l_field) + 2;
@@ -39,11 +38,15 @@ void MBusComponent::parse_c_mode_(const std::vector<uint8_t> &packet, const MBus
            format_name, static_cast<unsigned>(packet.size()), static_cast<unsigned>(expected), l_field, meta.rssi,
            meta.lqi, meta.freq_offset);
 
-  if (expected == 0 || expected != packet.size()) {
+  if (expected == 0 || packet.size() < expected) {
     ESP_LOGW(TAG, "Length mismatch for mode C frame with format %s: received=%u expected=%u l=%u", format_name,
              static_cast<unsigned>(packet.size()), static_cast<unsigned>(expected), l_field);
     return;
   }
+
+  // Some transports (e.g. fixed-length SX126x reception) always deliver a fixed-size buffer padded
+  // with trailing noise after the real frame; only the part accounted for by the L field is real.
+  const size_t frame_length = expected - 2;
 
   uint8_t failed_block = 0;
   std::vector<uint8_t> frame_without_crcs;
@@ -73,14 +76,16 @@ void MBusComponent::parse_t_mode_(const std::vector<uint8_t> &packet, const MBus
   ESP_LOGD(TAG, "Received mode T frame: bytes=%u expected=%u l=%u rssi=%.0f lqi=%u dFreq=%.0f",
            static_cast<unsigned>(packet.size()), static_cast<unsigned>(expected_encoded), l_field, meta.rssi, meta.lqi,
            meta.freq_offset);
-  if (expected_decoded == 0 || expected_encoded != packet.size()) {
+  if (expected_decoded == 0 || packet.size() < expected_encoded) {
     ESP_LOGW(TAG, "Length mismatch for mode T frame: received=%u expected=%u l=%u",
              static_cast<unsigned>(packet.size()), static_cast<unsigned>(expected_encoded), l_field);
     return;
   }
 
+  // As in parse_c_mode_(): decode only the L-field-accounted-for portion, ignoring any trailing
+  // padding a fixed-length transport may have delivered.
   std::vector<uint8_t> decoded_frame;
-  if (!wmbus_frame_codec::decode_3of6(packet.data(), packet.size(), &decoded_frame) ||
+  if (!wmbus_frame_codec::decode_3of6(packet.data(), expected_encoded, &decoded_frame) ||
       decoded_frame.size() != expected_decoded) {
     ESP_LOGW(TAG, "3-of-6 decoding failed: mode=T");
     return;
