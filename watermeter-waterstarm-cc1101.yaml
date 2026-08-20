@@ -31,8 +31,8 @@
 #
 
 esphome:
-  name: watermeter-waterstarm
-  friendly_name: Watermeter WaterStarM
+  name: watermeter-waterstarm-cc1101
+  friendly_name: Watermeter WaterStarM CC1101
   platformio_options:
     board_build.flash_mode: dio
 
@@ -65,6 +65,11 @@ captive_portal:
 
 time:
   - platform: homeassistant
+
+status_led:
+  pin:
+    number: GPIO8
+    inverted: true
 
 external_components:
   - source: github://hn/esphome-mbus@main

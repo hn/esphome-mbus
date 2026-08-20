@@ -1,0 +1,211 @@
+#
+# watermeter-waterstarm-sx127x.yaml -- ESPHome config to read WMBUS watermeter via SX127X radio 868 Mhz
+#
+# WaterStarM M-ETH Q3 2,5 Water Meter,
+# marketed by: Brummerhoop
+# https://www.brummerhoop.com/media/ce/2a/62/1668505287/1081600001_2019-02-20_ba_waterstar_m_mid_de_en.pdf
+# manufactured by: Lorenz GmbH & Co. KG
+# technical support by: Engelmann Sensor GmbH
+#
+# By factory default, the M-ETH watermeter only sends data during the day from 08:00-18:00.
+#
+# (C) 2026 Hajo Noerenberg
+#
+# Usage: Connect SX127X radio module to ESP32 via SPI
+#
+# http://www.noerenberg.de/
+# https://github.com/hn/esphome-mbus
+#
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 3.0 as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program. If not, see <http://www.gnu.org/licenses/gpl-3.0.txt>.
+#
+
+esphome:
+  name: watermeter-waterstarm-sx127x
+  friendly_name: Watermeter WaterStarM SX127X
+  platformio_options:
+    board_build.flash_mode: dio
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: ESP32C3
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "SX127X Fallback Hotspot"
+    password: !secret wifi_ap_password
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+
+status_led:
+  pin:
+    number: GPIO8
+    inverted: true
+
+external_components:
+  - source: github://hn/esphome-mbus@main
+    components: [ sx127x, mbus ]
+
+spi:
+  clk_pin: GPIO4
+  mosi_pin: GPIO6
+  miso_pin: GPIO5
+
+sx127x:
+  id: sx127x_radio
+  cs_pin: GPIO7
+  rst_pin: GPIO3
+  dio0_pin: GPIO10
+  dio1_pin: GPIO1          # required for payload_length_lambda / payload_length > 64 (long packet RX)
+
+  # --- RF front-end
+  modulation: FSK
+  frequency: 868.95MHz
+  bitrate: 100000
+  deviation: 38kHz
+  bandwidth: 250_0kHz
+
+  # --- Sync / framing
+  sync_value: [0x54, 0x3D]
+  preamble_detect: 2
+  preamble_polarity: 0x55
+  preamble_errors: 8
+  bitsync: true
+
+  # --- Packet handling
+  crc_enable: false
+  packet_mode: true
+  payload_length: 0
+  payload_length_lambda: |-
+    return esphome::mbus::wmbus_frame_codec::expected_packet_length(x);
+
+  on_packet:
+    then:
+      - lambda: |-
+          ESP_LOGD("sx127x_rx", "RX %u bytes  RSSI=%.0f dBm  SNR=%.1f dB", x.size(), rssi, snr);
+
+mbus:
+  id: waterstar_wireless
+  radio_sx127x_id: sx127x_radio
+  encryption_key: !secret garden_watermeter_aes_key
+  dump_records: false
+
+sensor:
+  - platform: mbus
+    mbus_id: waterstar_wireless
+    name: "Total water consumption"
+    dif: 0x04
+    vif: 0x13
+    storage: 0
+    tariff: 0
+    subunit: 0
+    function: instantaneous
+    unit_of_measurement: "m³"
+    device_class: water
+    state_class: total_increasing
+    accuracy_decimals: 3
+    icon: mdi:water-pump
+    filters:
+      - multiply: 0.001
+
+  - platform: mbus
+    mbus_id: waterstar_wireless
+    name: "Meter internal time"
+    dif: 0x04
+    vif: 0x6D
+    storage: 0
+    tariff: 0
+    subunit: 0
+    function: instantaneous
+    device_class: timestamp
+    entity_category: diagnostic
+
+  - platform: mbus
+    mbus_id: waterstar_wireless
+    name: "Water backflow"
+    dif: 0x44
+    vif: 0x13
+    storage: 1
+    tariff: 0
+    subunit: 0
+    function: instantaneous
+    vife: [0x3C]
+    unit_of_measurement: "m³"
+    device_class: water
+    state_class: total_increasing
+    accuracy_decimals: 3
+    icon: mdi:skip-backward
+    entity_category: diagnostic
+    filters:
+      - multiply: 0.001
+
+binary_sensor:
+  - platform: mbus
+    mbus_id: waterstar_wireless
+    name: "Meter battery"
+    dif: 0x02
+    vif: 0x7D
+    vif_ext: 0x7D17
+    storage: 0
+    tariff: 0
+    subunit: 0
+    function: instantaneous
+    bit: 4
+    device_class: battery
+    entity_category: diagnostic
+
+  - platform: mbus
+    mbus_id: waterstar_wireless
+    name: "Leakage"
+    dif: 0x02
+    vif: 0x7D
+    vif_ext: 0x7D17
+    storage: 0
+    tariff: 0
+    subunit: 0
+    function: instantaneous
+    bit: 6
+    device_class: problem
+
+  - platform: mbus
+    mbus_id: waterstar_wireless
+    name: "Reverse flow"
+    dif: 0x02
+    vif: 0x7D
+    vif_ext: 0x7D17
+    storage: 0
+    tariff: 0
+    subunit: 0
+    function: instantaneous
+    bit: 7
+    device_class: problem
+    entity_category: diagnostic

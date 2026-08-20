@@ -5,9 +5,10 @@ for [ESPHome](https://esphome.io/): wireless (CC1101, SX126x, SX127x) and wired 
 component core, with a full DIF/VIF/VIFE record dump instead of built-in per-meter drivers.
 
 > [!NOTE]
-> **Project Status:** Early stage. Wireless C1 Format A is hardware-validated against a real WaterStarM water
-> meter. Everything else (C1 Format B, T1, SX126x/SX127x, wired UART) is implemented but not yet validated
-> against real hardware — see [Supported Transports](#supported-transports--validation-status) below.
+> **Project Status:** Early stage. Wireless C1 Format A is hardware-validated against a real WaterStarM
+> water meter, over CC1101, SX126x, and SX127x. Everything else (C1 Format B, T1, wired UART) is
+> implemented but not yet validated against real hardware — see
+> [Supported Transports](#supported-transports--validation-status) below.
 
 Please do me a favor: :thumbsup: If you use any information or code you find here, please link back to this page.
 :star: Also, please consider to star this project. I really like to keep track of who is using this to do creative things, especially if you are from other parts of the world.
@@ -45,37 +46,48 @@ The `mbus` component picks exactly one source per instance (`radio_cc1101_id`, `
 `radio_sx127x_id`, or `wired_uart_id`); multiple `mbus:` instances are supported (e.g. several meters on
 one link). See [`components/mbus`](components/mbus) for the implementation.
 
-## The bundled `cc1101` copy
-
-This repository temporarily vendors a patched copy of ESPHome core's `cc1101` component, under
-[`components/cc1101`](components/cc1101). It exists only because `mbus` needs long-packet RX support
-(`packet_length` above 64 bytes, and `packet_length_lambda` for protocols whose length isn't known
-upfront) that core `cc1101` doesn't have yet. The patches are split into three upstream pull requests:
-
-- [esphome/esphome#17576](https://github.com/esphome/esphome/pull/17576) — export `CC1101Listener` to
-  Python (not required by `mbus` itself, but a prerequisite for other external components to use
-  `cc1101.CC1101Listener`).
-- [esphome/esphome#17577](https://github.com/esphome/esphome/pull/17577) — FOCCFG/BSCFG frequency offset
-  and bit sync tuning options (not required, improves RX quality for narrowband protocols like wM-Bus).
-- [esphome/esphome#17578](https://github.com/esphome/esphome/pull/17578) — long packet RX support
-  (**required** by `mbus`; this is the actual blocker for dropping the vendored copy).
-
-These pull requests are pending review and may be rejected, changed significantly, or take a while either
-way — there's no guarantee they'll be merged as-is, or at all. If and when #17578 lands in an ESPHome
-release, `mbus` can work against core `cc1101` directly, the local copy can be removed from this
-repository, and `cc1101` would no longer need to be listed under `components:` above. Until then, this
-vendored copy remains the way to get long-packet RX support.
-
 ## Supported Transports & Validation Status
+
+### Wireless (CC1101, SX126x, SX127x)
+
+All three radios go through the same transport-independent wM-Bus framing/decoding, so what's
+implemented doesn't vary by chip — only what's actually been validated against real hardware does:
+
+| wM-Bus mode/format | Validated against real hardware |
+|---|---|
+| C1 Format A | Yes — WaterStarM water meter, on all three radios |
+| C1 Format B | No — host-side/synthetic test vectors only |
+| T1 | No — host-side/synthetic test vectors only |
+
+SX126x is additionally hardware-capped at 255 bytes on the air interface — fine for most C1 telegrams,
+but likely not enough for T1 (3-of-6 encoding inflates the on-air size). CC1101 and SX127x have no such
+cap.
+
+### Wired / Other
 
 | Transport | Implemented | Validated against real hardware |
 |---|---|---|
-| CC1101, wM-Bus C1 Format A | Yes | Yes (WaterStarM water meter) |
-| CC1101, wM-Bus C1 Format B | Yes | No (host-side/synthetic test vectors only) |
-| CC1101, wM-Bus T1 | Yes | No (host-side/synthetic test vectors only) |
-| SX126x / SX127x, wM-Bus C1/T1 | Yes (shares the CC1101 code path via ESPHome core radio listeners), but capped at 64-byte packets — see below | No |
 | Wired M-Bus over UART | Yes | No |
 | TCP (M-Bus/wM-Bus gateway) | No, conceptual only, not committed to | — |
+
+## Bundled radio component patches
+
+This repository temporarily vendors patched copies of two ESPHome core components — `cc1101` under
+[`components/cc1101`](components/cc1101) and `sx127x` under [`components/sx127x`](components/sx127x) —
+because `mbus` needs long-packet RX support (`packet_length`/`payload_length` above 64 bytes, plus a
+`..._length_lambda` for protocols whose length isn't known upfront) that core doesn't have yet for
+either chip:
+
+- `cc1101` — long-packet RX — [esphome/esphome#17578](https://github.com/esphome/esphome/pull/17578),
+  pending review.
+- `sx127x` — long-packet RX plus real RSSI for FSK/OOK —
+  [esphome/esphome#18547](https://github.com/esphome/esphome/pull/18547), pending review.
+
+Both patches are pending review and may be rejected, changed significantly, or take a while either way —
+there's no guarantee they'll be merged as-is, or at all. If and when one lands
+in an ESPHome release, `mbus` can work against core directly for that chip, the local copy can be
+removed from this repository, and it would no longer need to be listed under `components:` in your
+config. Until then, these vendored copies remain the way to get long-packet RX support.
 
 ## Configuration Example
 
@@ -120,11 +132,6 @@ sensor:
 Instead of `radio_cc1101_id`, you can use `radio_sx126x_id` or `radio_sx127x_id` with a configured
 `sx126x`/`sx127x` radio component.
 
-Core `sx126x`/`sx127x` have the same 64-byte packet cap that `cc1101` had, but no equivalent long-packet
-patch exists for them here (or upstream) yet. Most wM-Bus telegrams exceed 64 bytes, so the `mbus` code
-path for these radios is implemented and wired up, but likely can't receive full telegrams in practice
-until a similar patch is written for them too.
-
 ### Wired M-Bus Example
 
 Wired M-Bus over UART works the same way, just with a different source and no radio-specific settings.
@@ -147,13 +154,22 @@ mbus:
     dump_records: true
 ```
 
-### Complete Example: WaterStarM Water Meter
+### Complete Examples: WaterStarM Water Meter
 
-[`watermeter-waterstarm-cc1101.yaml`](watermeter-waterstarm-cc1101.yaml) is a full, ready-to-flash
-configuration for a real meter (WaterStarM M-ETH Q3 2.5, wireless via CC1101) — the one this component
-was originally hardware-validated against. Besides `cc1101:`/`mbus:`, it includes WiFi, the native API,
-OTA, a captive-portal fallback, and working `sensor:`/`binary_sensor:` entities, so it doubles as a
-complete reference for wiring everything else in this README together into a real device.
+[`watermeter-waterstarm-cc1101.yaml`](watermeter-waterstarm-cc1101.yaml),
+[`watermeter-waterstarm-sx126x.yaml`](watermeter-waterstarm-sx126x.yaml) and
+[`watermeter-waterstarm-sx127x.yaml`](watermeter-waterstarm-sx127x.yaml) are full, ready-to-flash
+configurations for the same real meter (WaterStarM M-ETH Q3 2.5), one per radio chip — the meter this
+component was originally hardware-validated against. Besides the radio and `mbus:` config, each
+includes working `sensor:`/`binary_sensor:` entities, so any of them doubles as a complete reference for
+wiring everything else in this README together into a real device.
+
+- [`watermeter-waterstarm-cc1101.yaml`](watermeter-waterstarm-cc1101.yaml) — bare CC1101 breakout board.
+- [`watermeter-waterstarm-sx126x.yaml`](watermeter-waterstarm-sx126x.yaml) — Heltec WiFi LoRa 32 board
+  (not a bare breakout). Hardware-capped at 255 bytes on the air interface, see
+  [Supported Transports](#supported-transports--validation-status) — may not be enough for longer/T1
+  telegrams.
+- [`watermeter-waterstarm-sx127x.yaml`](watermeter-waterstarm-sx127x.yaml) — bare SX1276 breakout board.
 
 ## Building Your YAML From a Record Dump
 
@@ -241,6 +257,9 @@ binary_sensor:
   Philosophy](#design-philosophy) above.
 - C1 Format B and T1 need real captured regression fixtures; currently only validated with synthetic/
   standards-derived test vectors.
+- SX126x is hardware-capped at 255 bytes on the air interface — enough for most C1 telegrams, but not
+  necessarily for longer ones or T1 (3-of-6 encoding inflates the on-air size). This is a hardware limit,
+  not a missing patch — there's no workaround.
 - Wired UART is implemented but frozen pending real hardware logs; response control field, status bits
   and non-zero signature handling still need hardening before first hardware use.
 - TCP transport is only a conceptual placeholder in the architecture; it's not committed to being

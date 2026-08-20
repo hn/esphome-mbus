@@ -1,0 +1,251 @@
+#
+# watermeter-waterstarm-sx126x.yaml -- ESPHome config to read WMBUS watermeter via SX126X radio 868 Mhz
+#
+# Due to hardware restrictions the SX126X can only receive packets with a max length of 255 bytes!
+#
+# This config is for the Heltec V4 board with 2MB PSRAM (ESP32-S3R2) and 16MB quad (4 data lines) flash:
+# https://wiki.heltec.org/docs/devices/open-source-hardware/esp32-series/lora-32/wifi-lora-32-v4/
+# https://resource.heltec.cn/download/WiFi_LoRa_32_V4/Schematic/WiFi_LoRa_32_V4.2.pdf
+#
+#
+# WaterStarM M-ETH Q3 2,5 Water Meter,
+# marketed by: Brummerhoop
+# https://www.brummerhoop.com/media/ce/2a/62/1668505287/1081600001_2019-02-20_ba_waterstar_m_mid_de_en.pdf
+# manufactured by: Lorenz GmbH & Co. KG
+# technical support by: Engelmann Sensor GmbH
+#
+# By factory default, the M-ETH watermeter only sends data during the day from 08:00-18:00.
+#
+# (C) 2026 Hajo Noerenberg
+#
+# Usage: Flash to Heltec V4 board (ESP32-S3R2)
+#
+# http://www.noerenberg.de/
+# https://github.com/hn/esphome-mbus
+#
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 3.0 as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program. If not, see <http://www.gnu.org/licenses/gpl-3.0.txt>.
+#
+
+esphome:
+  name: watermeter-waterstarm-sx126x
+  friendly_name: Watermeter WaterStarM SX126X
+  platformio_options:
+    board_build.flash_mode: dio
+  on_boot:
+    priority: 1000
+    then:
+       - lambda: |-
+          gpio_set_direction((gpio_num_t)36, GPIO_MODE_OUTPUT);
+          gpio_set_level((gpio_num_t)36, 0);
+          ESP_LOGI("BOOT", "Set GPIO36=LOW (Vext_Ctrl=ON for OLED display)");
+          vTaskDelay(pdMS_TO_TICKS(100));
+
+esp32:
+  board: esp32-s3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "SX126X Fallback Hotspot"
+    password: !secret wifi_ap_password
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+
+status_led:
+  pin: GPIO35
+
+external_components:
+  - source: github://hn/esphome-mbus@main
+    components: [ mbus ]
+
+spi:
+  clk_pin: GPIO9
+  mosi_pin: GPIO10
+  miso_pin: GPIO11
+
+sx126x:
+  id: sx126x_radio
+  hw_version: sx1262
+  cs_pin: GPIO8
+  rst_pin: GPIO12
+  busy_pin: GPIO13
+  dio1_pin: GPIO14
+  rf_switch: true
+  tcxo_voltage: 1_8V
+  tcxo_delay: 5ms
+
+  # --- RF front-end
+  modulation: FSK
+  frequency: 868.95MHz
+  bitrate: 100000
+  deviation: 38kHz
+  bandwidth: 234_3kHz
+
+  # --- Sync / framing
+  sync_value: [0x54, 0x3D]
+  preamble_detect: 2               # >0 enables AFC (the CC1101 FOCCFG equivalent) + preamble detection
+
+  # --- AGC / Frequency offset compensation / Bit synchronization
+  # All fully automatic/internal on the SX1262 (no FOCCFG/BSCFG/AGC register equivalents to set).
+
+  # --- Packet handling
+  crc_enable: false                # wM-Bus CRC handling lives in mbus
+  payload_length: 255              # fixed window; mbus trims to the real L-field length
+
+  on_packet:
+    then:
+      - lambda: |-
+          ESP_LOGD("sx126x_rx", "RX %u bytes  RSSI=%.0f dBm  SNR=%.1f dB", x.size(), rssi, snr);
+
+mbus:
+  id: waterstar_wireless
+  radio_sx126x_id: sx126x_radio
+  encryption_key: !secret garden_watermeter_aes_key
+  dump_records: false
+
+sensor:
+  - platform: mbus
+    mbus_id: waterstar_wireless
+    name: "Total water consumption"
+    id: total_water
+    dif: 0x04
+    vif: 0x13
+    storage: 0
+    tariff: 0
+    subunit: 0
+    function: instantaneous
+    unit_of_measurement: "m³"
+    device_class: water
+    state_class: total_increasing
+    accuracy_decimals: 3
+    icon: mdi:water-pump
+    filters:
+      - multiply: 0.001
+
+  - platform: mbus
+    mbus_id: waterstar_wireless
+    name: "Meter internal time"
+    dif: 0x04
+    vif: 0x6D
+    storage: 0
+    tariff: 0
+    subunit: 0
+    function: instantaneous
+    device_class: timestamp
+    entity_category: diagnostic
+
+  - platform: mbus
+    mbus_id: waterstar_wireless
+    name: "Water backflow"
+    dif: 0x44
+    vif: 0x13
+    storage: 1
+    tariff: 0
+    subunit: 0
+    function: instantaneous
+    vife: [0x3C]
+    unit_of_measurement: "m³"
+    device_class: water
+    state_class: total_increasing
+    accuracy_decimals: 3
+    icon: mdi:skip-backward
+    entity_category: diagnostic
+    filters:
+      - multiply: 0.001
+
+binary_sensor:
+  - platform: mbus
+    mbus_id: waterstar_wireless
+    name: "Meter battery"
+    dif: 0x02
+    vif: 0x7D
+    vif_ext: 0x7D17
+    storage: 0
+    tariff: 0
+    subunit: 0
+    function: instantaneous
+    bit: 4
+    device_class: battery
+    entity_category: diagnostic
+
+  - platform: mbus
+    mbus_id: waterstar_wireless
+    name: "Leakage"
+    id: leak
+    dif: 0x02
+    vif: 0x7D
+    vif_ext: 0x7D17
+    storage: 0
+    tariff: 0
+    subunit: 0
+    function: instantaneous
+    bit: 6
+    device_class: problem
+
+  - platform: mbus
+    mbus_id: waterstar_wireless
+    name: "Reverse flow"
+    id: revflow 
+    dif: 0x02
+    vif: 0x7D
+    vif_ext: 0x7D17
+    storage: 0
+    tariff: 0
+    subunit: 0
+    function: instantaneous
+    bit: 7
+    device_class: problem
+    entity_category: diagnostic
+
+i2c:
+  sda: GPIO17
+  scl: GPIO18
+  frequency: 400kHz
+
+font:
+  - { file: "gfonts://Roboto", id: font_big, size: 22 }
+  - { file: "gfonts://Roboto", id: font_small, size: 11 }
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    address: 0x3C
+    reset_pin: GPIO21
+    update_interval: 5s
+    lambda: |-
+      it.print(0, 0, id(font_small), "WaterStarM");
+      if (id(total_water).has_state())
+        it.printf(0, 15, id(font_big), "%.3f m3", id(total_water).state);
+      else
+        it.print(0, 15, id(font_big), "-- m3");
+      if (id(leak).state)    it.print(95, 44, id(font_small), "LEAK");
+      if (id(revflow).state) it.print(60, 44, id(font_small), "REV");
