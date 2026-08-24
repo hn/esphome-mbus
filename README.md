@@ -89,6 +89,17 @@ in an ESPHome release, `mbus` can work against core directly for that chip, the 
 removed from this repository, and it would no longer need to be listed under `components:` in your
 config. Until then, these vendored copies remain the way to get long-packet RX support.
 
+They also take the simplest approach available for now, following ESPHome's existing conventions rather
+than introducing a new pattern; a preferred approach for latency-sensitive radio RX, if the core
+maintainers recommend one, may be adopted later. The RX FIFO is drained from ESPHome's cooperative
+`loop()`: a GPIO interrupt on the FIFO-threshold pin wakes the main loop immediately via
+`enable_loop_soon_any_context()`, rather than waiting for the regular loop interval. That's the best
+available within ESPHome's scheduling model, but it's not a hard real-time guarantee — another component
+blocking its own `loop()` for long enough could still cause a FIFO overrun (detected and recovered from,
+not silently corrupted). Hardware-validated reliably at up to 100 kbit/s (wM-Bus mode C1); see
+[this discussion on esphome/esphome#18547](https://github.com/esphome/esphome/pull/18547#issuecomment-5366822112)
+for more background.
+
 ## Configuration Example
 
 ```yaml
