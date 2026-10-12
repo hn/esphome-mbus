@@ -18,8 +18,9 @@ Please do me a favor: :thumbsup: If you use any information or code you find her
 
 Other (w)M-Bus options exist for ESPHome; this one is built around a few specific choices:
 
-- **Reuses existing ESPHome hardware components.** Wireless (CC1101, SX126x, SX127x) and wired (UART) all
-  go through ESPHome's own radio/UART components — no custom hardware drivers to maintain.
+- **Reuses existing ESPHome hardware components.** Wireless (CC1101, SX126x, SX127x) and wired (UART, via
+  an external transceiver) all go through ESPHome's own radio/UART components — no custom hardware
+  drivers to maintain.
 - **One component, every transport.** Wireless and wired share the same core: link framing → application
   layer → DIF/VIF/VIFE records → ESPHome entities. A TCP transport (M-Bus/wM-Bus gateways) is kept in mind
   conceptually so the architecture wouldn't have to change to add it, but it is not committed to being
@@ -164,6 +165,11 @@ mbus:
     update_interval: 60s
     dump_records: true
 ```
+
+Wired M-Bus needs an external M-Bus master transceiver between the ESP32's UART pins and the physical
+two-wire bus — it supplies the bus's 24-36V power and converts between the bus's current-loop modulation
+and standard UART logic levels. `esphome-mbus` only speaks the resulting byte stream on top of that; it
+doesn't provide or replace the transceiver itself.
 
 ### Complete Examples: WaterStarM Water Meter
 
