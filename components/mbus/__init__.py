@@ -1,7 +1,7 @@
 import esphome.codegen as cg
+from esphome.components import cc1101, sx126x, sx127x, uart
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_UPDATE_INTERVAL
-from esphome.components import cc1101, sx126x, sx127x, uart
 
 CODEOWNERS = ["@hn"]
 
@@ -42,8 +42,7 @@ def validate_single_source(config):
     present = [key for key in SOURCE_KEYS if key in config]
     if len(present) != 1:
         raise cv.Invalid(
-            "Exactly one M-Bus source is required, one of: "
-            + ", ".join(SOURCE_KEYS)
+            "Exactly one M-Bus source is required, one of: " + ", ".join(SOURCE_KEYS)
         )
     if CONF_WIRED_UART_ID in config and CONF_SECONDARY_ADDRESS not in config:
         raise cv.Invalid("secondary_address is required with wired_uart_id")

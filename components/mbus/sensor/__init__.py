@@ -1,6 +1,7 @@
 import esphome.codegen as cg
-import esphome.config_validation as cv
 from esphome.components import sensor
+import esphome.config_validation as cv
+
 from .. import MBusComponent, mbus_ns
 
 DEPENDENCIES = ["mbus"]

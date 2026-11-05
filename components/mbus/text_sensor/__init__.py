@@ -1,6 +1,7 @@
 import esphome.codegen as cg
-import esphome.config_validation as cv
 from esphome.components import text_sensor
+import esphome.config_validation as cv
+
 from .. import MBusComponent, mbus_ns
 
 DEPENDENCIES = ["mbus"]
@@ -36,7 +37,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_STORAGE): cv.uint32_t,
             cv.Optional(CONF_TARIFF): cv.uint32_t,
             cv.Optional(CONF_SUBUNIT): cv.uint32_t,
-            cv.Optional(CONF_FUNCTION, default="instantaneous"): cv.enum(FUNCTIONS, lower=True),
+            cv.Optional(CONF_FUNCTION, default="instantaneous"): cv.enum(
+                FUNCTIONS, lower=True
+            ),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
