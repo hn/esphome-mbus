@@ -1,12 +1,13 @@
 #include "mbus.h"
 
-#include "esphome/core/alloc_helpers.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <algorithm>
+
 namespace esphome::mbus {
 
-static const char *const TAG = "mbus";
+ESPHOME_LOG_TAG(TAG, "mbus");
 
 static constexpr uint8_t MBUS_WIRED_LONG_START = 0x68;
 static constexpr uint8_t MBUS_WIRED_STOP = 0x16;
@@ -27,7 +28,9 @@ bool MBusComponent::handle_wired_link_frame_(const std::vector<uint8_t> &frame, 
 
   if (frame[0] != MBUS_WIRED_LONG_START || frame[1] != frame[2] || frame[3] != MBUS_WIRED_LONG_START ||
       frame.back() != MBUS_WIRED_STOP) {
-    ESP_LOGW(TAG, "Invalid wired long frame header: %s", format_hex_pretty(frame).c_str());
+    char hex[format_hex_pretty_size(MBUS_LOG_HEX_MAX_BYTES)];
+    ESP_LOGW(TAG, "Invalid wired long frame header: %s",
+             format_hex_pretty_to(hex, frame.data(), std::min(frame.size(), MBUS_LOG_HEX_MAX_BYTES)));
     return false;
   }
 

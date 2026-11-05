@@ -5,7 +5,7 @@
 
 namespace esphome::mbus {
 
-static const char *const TAG = "mbus";
+ESPHOME_LOG_TAG(TAG, "mbus");
 
 void MBusComponent::setup() {
 #ifdef USE_MBUS_CC1101
@@ -34,13 +34,6 @@ void MBusComponent::setup() {
 }
 
 void MBusComponent::register_record_listener(MBusRecordListener *listener) {
-  const std::string key = listener->match_key();
-  for (auto *existing : this->record_listeners_) {
-    if (existing->match_key() == key) {
-      ESP_LOGW(TAG, "Ignoring duplicate M-Bus listener config: %s", key.c_str());
-      return;
-    }
-  }
   this->record_listeners_.push_back(listener);
 }
 
@@ -77,7 +70,7 @@ void MBusComponent::dump_config() {
   if (this->has_encryption_key_) {
     ESP_LOGCONFIG(TAG, "  Encryption key: configured");
   }
-  ESP_LOGCONFIG(TAG, "  Dump records: %s", this->dump_records_enabled_ ? "YES" : "NO");
+  ESP_LOGCONFIG(TAG, "  Dump records: %s", YESNO(this->dump_records_enabled_));
 }
 
 #ifdef USE_MBUS_CC1101

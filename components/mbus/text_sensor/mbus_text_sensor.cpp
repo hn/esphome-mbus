@@ -4,7 +4,7 @@
 
 namespace esphome::mbus {
 
-static const char *const TAG = "mbus.text_sensor";
+ESPHOME_LOG_TAG(TAG, "mbus.text_sensor");
 
 void MBusTextSensor::dump_config() {
   LOG_TEXT_SENSOR("", "M-Bus Text Sensor", this);

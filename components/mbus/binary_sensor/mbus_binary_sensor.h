@@ -15,9 +15,6 @@ class MBusBinarySensor : public binary_sensor::BinarySensor,
 
   void dump_config() override;
   bool matches(const MBusRecord &record) const override;
-  std::string match_key() const override {
-    return std::string("binary_sensor:") + this->match_key_base() + ":bit=" + std::to_string(this->bit_);
-  }
   void publish_record(const MBusRecord &record) override;
 
  protected:

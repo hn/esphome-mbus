@@ -2,28 +2,29 @@
 #include "records_codec.h"
 #include "vif_table.h"
 
-#include "esphome/core/alloc_helpers.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 
 namespace esphome::mbus {
 
-static const char *const TAG = "mbus";
+ESPHOME_LOG_TAG(TAG, "mbus");
 
 static MBusRecordFunction dif_function_from_dif(uint8_t dif) {
   switch ((dif >> 4) & 0x03) {
     case 0:
-      return MBusRecordFunction::INSTANTANEOUS;
+      return MBusRecordFunction::MBUS_RECORD_FUNCTION_INSTANTANEOUS;
     case 1:
-      return MBusRecordFunction::MAXIMUM;
+      return MBusRecordFunction::MBUS_RECORD_FUNCTION_MAXIMUM;
     case 2:
-      return MBusRecordFunction::MINIMUM;
+      return MBusRecordFunction::MBUS_RECORD_FUNCTION_MINIMUM;
     case 3:
-      return MBusRecordFunction::VALUE_DURING_ERROR;
+      return MBusRecordFunction::MBUS_RECORD_FUNCTION_VALUE_DURING_ERROR;
     default:
-      return MBusRecordFunction::INSTANTANEOUS;
+      return MBusRecordFunction::MBUS_RECORD_FUNCTION_INSTANTANEOUS;
   }
 }
 
@@ -31,72 +32,70 @@ static const char *record_function_to_string(MBusRecordFunction function) {
   return mbus_record_function_to_string(static_cast<uint8_t>(function));
 }
 
-static std::string format_double(double value) {
-  char buffer[32];
-  std::snprintf(buffer, sizeof(buffer), "%.12g", value);
-  return buffer;
+// Appends printf-style text to a fixed buffer; output beyond the buffer is cut off.
+static void append_to(char *buffer, size_t size, size_t &length, const char *format, ...) {
+  if (length + 1 >= size) {
+    return;
+  }
+  va_list args;
+  va_start(args, format);
+  const int written = vsnprintf(buffer + length, size - length, format, args);
+  va_end(args);
+  if (written > 0) {
+    length = std::min(size - 1, length + static_cast<size_t>(written));
+  }
 }
 
-static std::string format_hex_list(const std::vector<uint8_t> &data) {
-  if (data.empty()) {
-    return "[]";
+static void append_hex_list(char *buffer, size_t size, size_t &length, const char *name, const uint8_t *data,
+                            size_t count) {
+  append_to(buffer, size, length, " %s=[", name);
+  for (size_t i = 0; i < count; i++) {
+    append_to(buffer, size, length, i == 0 ? "0x%02X" : ",0x%02X", data[i]);
   }
-  std::string out = "[";
-  for (size_t i = 0; i < data.size(); i++) {
-    char item[8];
-    std::snprintf(item, sizeof(item), "0x%02X", data[i]);
-    if (i > 0) {
-      out += ",";
-    }
-    out += item;
-  }
-  out += "]";
-  return out;
+  append_to(buffer, size, length, "]");
 }
 
 static void log_record(const MBusRecord &record) {
-  std::string message =
-      str_sprintf("Record: dif=0x%02X vif=0x%02X storage=%u tariff=%u subunit=%u function=%s pos=%u vif_raw=0x%02X",
-                  record.dif, record.vif, static_cast<unsigned>(record.storage), static_cast<unsigned>(record.tariff),
-                  static_cast<unsigned>(record.subunit), record_function_to_string(record.function),
-                  static_cast<unsigned>(record.pos), record.vif_raw);
+  char message[512];
+  size_t length = 0;
+  append_to(message, sizeof(message), length,
+            "Record: dif=0x%02X vif=0x%02X storage=%u tariff=%u subunit=%u function=%s pos=%u vif_raw=0x%02X",
+            record.dif, record.vif, static_cast<unsigned>(record.storage), static_cast<unsigned>(record.tariff),
+            static_cast<unsigned>(record.subunit), record_function_to_string(record.function),
+            static_cast<unsigned>(record.pos), record.vif_raw);
   if (record.has_vif_ext) {
-    message += str_sprintf(" vif_ext=0x%04X", static_cast<unsigned>(record.vif_ext));
+    append_to(message, sizeof(message), length, " vif_ext=0x%04X", static_cast<unsigned>(record.vif_ext));
   }
-  message += str_sprintf(" dife=%s vife=%s data_type=%s raw=%s", format_hex_list(record.dife).c_str(),
-                         format_hex_list(record.vife).c_str(), record.data_type, record.raw.c_str());
+  append_hex_list(message, sizeof(message), length, "dife", record.dife.data(), record.dife.size());
+  append_hex_list(message, sizeof(message), length, "vife", record.vife.data(), record.vife.size());
+  char raw[format_hex_pretty_size(MBUS_LOG_HEX_MAX_BYTES)];
+  format_hex_pretty_to(raw, record.raw_data, std::min(record.raw_length, MBUS_LOG_HEX_MAX_BYTES), '.');
+  append_to(message, sizeof(message), length, " data_type=%s raw=%s", record.data_type, raw);
   if (!record.custom_vif.empty()) {
-    message += " custom_vif=";
-    message += record.custom_vif;
+    append_to(message, sizeof(message), length, " custom_vif=%s", record.custom_vif.c_str());
   }
   if (!record.flags.empty()) {
-    message += " flags=";
-    message += record.flags;
+    append_to(message, sizeof(message), length, " flags=%s", record.flags.c_str());
   }
   if (!record.decoded.empty()) {
-    message += "; decoded: value=";
-    message += record.decoded;
-    ESP_LOGD(TAG, "%s", message.c_str());
-    return;
+    append_to(message, sizeof(message), length, "; decoded: value=%s", record.decoded.c_str());
+  } else {
+    if (record.has_raw_value) {
+      append_to(message, sizeof(message), length, " raw_value=%lld", static_cast<long long>(record.raw_value));
+    }
+    if (record.has_decoded_value) {
+      append_to(message, sizeof(message), length, "; decoded: scale=%.12g unit=%s value=%.12g", record.scale,
+                record.unit, record.decoded_value);
+    }
   }
-  if (record.has_raw_value) {
-    message += " raw_value=";
-    message += std::to_string(record.raw_value);
-  }
-  if (record.has_decoded_value) {
-    message += "; decoded: scale=";
-    message += format_double(record.scale);
-    message += " unit=";
-    message += record.unit;
-    message += " value=";
-    message += format_double(record.decoded_value);
-  }
-  ESP_LOGD(TAG, "%s", message.c_str());
+  ESP_LOGD(TAG, "%s", message);
 }
 
 static void log_special_record(uint8_t dif, size_t pos, const char *data_type, const uint8_t *data, size_t length) {
+  char raw[format_hex_pretty_size(MBUS_LOG_HEX_MAX_BYTES)];
+  format_hex_pretty_to(raw, data, std::min(length, MBUS_LOG_HEX_MAX_BYTES), '.');
   ESP_LOGD(TAG, "Record: dif=0x%02X pos=%u data_type=%s raw=%s; decoded: type=%s", dif, static_cast<unsigned>(pos),
-           data_type, format_hex_pretty(data, length).c_str(), data_type);
+           data_type, raw, data_type);
 }
 
 void MBusComponent::parse_records_(const std::vector<uint8_t> &payload,
@@ -139,6 +138,11 @@ void MBusComponent::parse_records_(const std::vector<uint8_t> &payload,
                  static_cast<unsigned>(record_pos), dif);
         return;
       }
+      if (dife.size() >= 8) {
+        ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=too many DIFE entries dif=0x%02X",
+                 static_cast<unsigned>(record_pos), dif);
+        return;
+      }
       const uint8_t item = payload[pos++];
       dife.push_back(item);
       storage |= uint32_t(item & 0x0F) << storage_shift;
@@ -148,11 +152,6 @@ void MBusComponent::parse_records_(const std::vector<uint8_t> &payload,
       tariff_shift += 2;
       subunit_shift += 1;
       extension = item & 0x80;
-      if (dife.size() > 8) {
-        ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=too many DIFE entries dif=0x%02X",
-                 static_cast<unsigned>(record_pos), dif);
-        return;
-      }
     }
 
     if (pos >= payload.size()) {
@@ -264,7 +263,8 @@ void MBusComponent::parse_records_(const std::vector<uint8_t> &payload,
         return;
       }
       const uint8_t *data = payload.data() + pos;
-      record.raw = format_hex_pretty(data, data_length);
+      record.raw_data = data;
+      record.raw_length = data_length;
       if (lvar <= 0xBF) {
         record.data_type = "lvar_ascii";
         record.decoded = records_codec::decode_variable_ascii(data, data_length);
@@ -319,7 +319,8 @@ void MBusComponent::parse_records_(const std::vector<uint8_t> &payload,
     }
 
     const uint8_t *data = payload.data() + pos;
-    record.raw = format_hex_pretty(data, data_length);
+    record.raw_data = data;
+    record.raw_length = data_length;
 
     // Date/time records are decoded from their bit layout, not as scaled numbers.
     if (vif_is_datetime(vif_key)) {

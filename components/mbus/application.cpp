@@ -1,6 +1,5 @@
 #include "mbus.h"
 
-#include "esphome/core/alloc_helpers.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
@@ -8,7 +7,7 @@
 
 namespace esphome::mbus {
 
-static const char *const TAG = "mbus";
+ESPHOME_LOG_TAG(TAG, "mbus");
 
 static constexpr uint8_t MBUS_CI_APP_SHORT = 0x7A;
 static constexpr uint8_t MBUS_CI_VARIABLE_RESPONSE = 0x72;
@@ -54,7 +53,8 @@ void MBusComponent::handle_short_application_frame_(const MBusApplicationFrame &
   const bool encrypted = encryption_mode != 0;
 
   ESP_LOGD(TAG, "AppHeader: CI=0x%02X AccessNr=%u Status=0x%02X Config=0x%04X EncMode=%u EncBlocks=%u Encrypted=%s",
-           frame.ci, access_number, status, config, encryption_mode, encrypted_blocks, encrypted ? "yes" : "no");
+           frame.ci, access_number, status, config, encryption_mode, encrypted_blocks,
+           encrypted ? LOG_STR_LITERAL("yes") : LOG_STR_LITERAL("no"));
 
   if (encrypted_length > payload_length) {
     ESP_LOGW(TAG, "Encrypted payload is truncated: offset=%u encrypted=%u payload=%u",
@@ -65,8 +65,12 @@ void MBusComponent::handle_short_application_frame_(const MBusApplicationFrame &
   if (encrypted_length > 0) {
     ESP_LOGD(TAG, "Encrypted payload: offset=%u bytes=%u", static_cast<unsigned>(payload_offset),
              static_cast<unsigned>(encrypted_length));
-    ESP_LOGV(TAG, "Encrypted payload data: %s",
-             format_hex_pretty(frame.data + payload_offset, encrypted_length).c_str());
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
+    char hex[format_hex_pretty_size(MBUS_LOG_HEX_MAX_BYTES)];
+    ESP_LOGV(
+        TAG, "Encrypted payload data: %s",
+        format_hex_pretty_to(hex, frame.data + payload_offset, std::min(encrypted_length, MBUS_LOG_HEX_MAX_BYTES)));
+#endif
   }
   if (encryption_mode == 0) {
     std::vector<uint8_t> payload(frame.data + payload_offset, frame.data + frame.length);
@@ -91,8 +95,17 @@ void MBusComponent::handle_short_application_frame_(const MBusApplicationFrame &
     ESP_LOGW(TAG, "Mode 5 decryption failed");
     return;
   }
+  // Mode 5 plaintext starts with two 0x2F verification bytes; anything else means a wrong key
+  if (decrypted.size() < 2 || decrypted[0] != 0x2F || decrypted[1] != 0x2F) {
+    ESP_LOGW(TAG, "Mode 5 decryption failed: no 0x2F2F verification bytes, wrong encryption_key?");
+    return;
+  }
   ESP_LOGD(TAG, "Decryption: OK, decrypted payload bytes=%u", static_cast<unsigned>(decrypted.size()));
-  ESP_LOGV(TAG, "Decrypted payload: %s", format_hex_pretty(decrypted).c_str());
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
+  char hex[format_hex_pretty_size(MBUS_LOG_HEX_MAX_BYTES)];
+  ESP_LOGV(TAG, "Decrypted payload: %s",
+           format_hex_pretty_to(hex, decrypted.data(), std::min(decrypted.size(), MBUS_LOG_HEX_MAX_BYTES)));
+#endif
   this->process_records_(decrypted);
 }
 
@@ -116,8 +129,11 @@ void MBusComponent::handle_application_frame_(const MBusApplicationFrame &frame)
     if (this->has_secondary_address_) {
       const std::array<uint8_t, 8> expected = secondary_address_bytes_(this->secondary_address_);
       if (!std::equal(expected.begin(), expected.end(), frame.data)) {
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
+        char hex[format_hex_pretty_size(8)];
         ESP_LOGV(TAG, "Ignoring variable data response for secondary address %s",
-                 format_hex_pretty(frame.data, 8).c_str());
+                 format_hex_pretty_to(hex, frame.data, 8));
+#endif
         return;
       }
     }

@@ -6,7 +6,7 @@
 
 namespace esphome::mbus {
 
-static const char *const TAG = "mbus";
+ESPHOME_LOG_TAG(TAG, "mbus");
 
 static constexpr size_t MBUS_DLL_HEADER_LENGTH = 10;
 
@@ -17,11 +17,11 @@ void MBusComponent::parse_c_mode_(const std::vector<uint8_t> &packet, const MBus
     return;
   }
 
-  WMBusFrameFormat format = WMBusFrameFormat::UNKNOWN;
+  WMBusFrameFormat format = WMBusFrameFormat::WMBUS_FRAME_FORMAT_UNKNOWN;
   if (packet[1] == wmbus_frame_codec::WMBUS_FRAME_A_PREFIX) {
-    format = WMBusFrameFormat::A;
+    format = WMBusFrameFormat::WMBUS_FRAME_FORMAT_A;
   } else if (packet[1] == wmbus_frame_codec::WMBUS_FRAME_B_PREFIX) {
-    format = WMBusFrameFormat::B;
+    format = WMBusFrameFormat::WMBUS_FRAME_FORMAT_B;
   } else {
     ESP_LOGD(TAG, "Ignoring C-mode packet with unknown frame marker: marker=0x%02X bytes=%u", packet[1],
              static_cast<unsigned>(packet.size()));
@@ -30,9 +30,9 @@ void MBusComponent::parse_c_mode_(const std::vector<uint8_t> &packet, const MBus
 
   const uint8_t *frame = packet.data() + 2;
   const uint8_t l_field = frame[0];
-  const size_t expected =
-      format == WMBusFrameFormat::A ? this->packet_len_frame_a_(l_field) + 2 : this->packet_len_frame_b_(l_field) + 2;
-  const char *format_name = format == WMBusFrameFormat::A ? "A" : "B";
+  const size_t expected = format == WMBusFrameFormat::WMBUS_FRAME_FORMAT_A ? this->packet_len_frame_a_(l_field) + 2
+                                                                           : this->packet_len_frame_b_(l_field) + 2;
+  const char *format_name = format == WMBusFrameFormat::WMBUS_FRAME_FORMAT_A ? "A" : "B";
 
   ESP_LOGD(TAG, "Received mode C frame with format %s: bytes=%u expected=%u l=%u rssi=%.0f lqi=%u dFreq=%.0f",
            format_name, static_cast<unsigned>(packet.size()), static_cast<unsigned>(expected), l_field, meta.rssi,
@@ -51,7 +51,7 @@ void MBusComponent::parse_c_mode_(const std::vector<uint8_t> &packet, const MBus
   uint8_t failed_block = 0;
   std::vector<uint8_t> frame_without_crcs;
   const bool crc_ok =
-      format == WMBusFrameFormat::A
+      format == WMBusFrameFormat::WMBUS_FRAME_FORMAT_A
           ? wmbus_frame_codec::strip_frame_a_crcs(frame, frame_length, &frame_without_crcs, &failed_block)
           : wmbus_frame_codec::strip_frame_b_crcs(frame, frame_length, &frame_without_crcs, &failed_block);
   if (!crc_ok) {

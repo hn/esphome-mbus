@@ -29,26 +29,29 @@
 
 namespace esphome::mbus {
 
-enum class WMBusFrameFormat : uint8_t { UNKNOWN, A, B };
+// Hex dumps in log lines are cut off after this many bytes
+static constexpr size_t MBUS_LOG_HEX_MAX_BYTES = 64;
+
+enum class WMBusFrameFormat : uint8_t { WMBUS_FRAME_FORMAT_UNKNOWN, WMBUS_FRAME_FORMAT_A, WMBUS_FRAME_FORMAT_B };
 
 #ifdef USE_MBUS_WIRED_UART
 enum class MBusWiredUartState : uint8_t {
-  IDLE,
-  START,
-  SEND_RESET_1,
-  WAIT_RESET_1,
-  SEND_RESET_2,
-  WAIT_RESET_2,
-  PURGE_RX,
-  SEND_SELECT_SECONDARY,
-  WAIT_SELECT_ACK,
-  WAIT_SELECT_SETTLE,
-  SEND_REQ_UD2,
-  WAIT_RESPONSE_HEADER,
-  WAIT_RESPONSE_BODY,
-  DONE,
-  RETRY,
-  FAILED,
+  MBUS_WIRED_UART_STATE_IDLE,
+  MBUS_WIRED_UART_STATE_START,
+  MBUS_WIRED_UART_STATE_SEND_RESET_1,
+  MBUS_WIRED_UART_STATE_WAIT_RESET_1,
+  MBUS_WIRED_UART_STATE_SEND_RESET_2,
+  MBUS_WIRED_UART_STATE_WAIT_RESET_2,
+  MBUS_WIRED_UART_STATE_PURGE_RX,
+  MBUS_WIRED_UART_STATE_SEND_SELECT_SECONDARY,
+  MBUS_WIRED_UART_STATE_WAIT_SELECT_ACK,
+  MBUS_WIRED_UART_STATE_WAIT_SELECT_SETTLE,
+  MBUS_WIRED_UART_STATE_SEND_REQ_UD2,
+  MBUS_WIRED_UART_STATE_WAIT_RESPONSE_HEADER,
+  MBUS_WIRED_UART_STATE_WAIT_RESPONSE_BODY,
+  MBUS_WIRED_UART_STATE_DONE,
+  MBUS_WIRED_UART_STATE_RETRY,
+  MBUS_WIRED_UART_STATE_FAILED,
 };
 #endif
 
@@ -81,7 +84,12 @@ struct MBusApplicationFrame {
   MBusReceiveMeta meta;
 };
 
-enum class MBusRecordFunction : uint8_t { INSTANTANEOUS, MAXIMUM, MINIMUM, VALUE_DURING_ERROR };
+enum class MBusRecordFunction : uint8_t {
+  MBUS_RECORD_FUNCTION_INSTANTANEOUS,
+  MBUS_RECORD_FUNCTION_MAXIMUM,
+  MBUS_RECORD_FUNCTION_MINIMUM,
+  MBUS_RECORD_FUNCTION_VALUE_DURING_ERROR,
+};
 
 // Shared by the record dump log (records.cpp) and every listener's dump_config() (sensor/
 // binary_sensor/text_sensor), so the function name text only has one definition.
@@ -100,9 +108,10 @@ struct MBusRecord {
   uint32_t storage{0};
   uint32_t tariff{0};
   uint32_t subunit{0};
-  MBusRecordFunction function{MBusRecordFunction::INSTANTANEOUS};
+  MBusRecordFunction function{MBusRecordFunction::MBUS_RECORD_FUNCTION_INSTANTANEOUS};
   const char *data_type{nullptr};
-  std::string raw;
+  const uint8_t *raw_data{nullptr};  // points into the payload being parsed
+  size_t raw_length{0};
   std::string flags;
   std::string decoded;
   bool has_raw_value{false};
@@ -119,7 +128,6 @@ class MBusRecordListener {
  public:
   virtual ~MBusRecordListener() = default;
   virtual bool matches(const MBusRecord &record) const = 0;
-  virtual std::string match_key() const = 0;
   virtual void publish_record(const MBusRecord &record) = 0;
 };
 
@@ -175,48 +183,6 @@ class MBusRecordMatcher {
       return false;
     }
     return true;
-  }
-  std::string match_key_base() const {
-    char dif[8];
-    char vif[8];
-    std::snprintf(dif, sizeof(dif), "0x%02X", this->dif_);
-    std::snprintf(vif, sizeof(vif), "0x%02X", this->vif_);
-    std::string key = "dif=";
-    key += dif;
-    key += ":vif=";
-    key += vif;
-    key += ":function=";
-    key += std::to_string(this->function_);
-    if (this->has_vif_ext_) {
-      char vif_ext[12];
-      std::snprintf(vif_ext, sizeof(vif_ext), "0x%04X", this->vif_ext_);
-      key += ":vif_ext=";
-      key += vif_ext;
-    }
-    if (this->has_storage_) {
-      key += ":storage=";
-      key += std::to_string(this->storage_);
-    }
-    if (this->has_tariff_) {
-      key += ":tariff=";
-      key += std::to_string(this->tariff_);
-    }
-    if (this->has_subunit_) {
-      key += ":subunit=";
-      key += std::to_string(this->subunit_);
-    }
-    if (this->has_vife_) {
-      key += ":vife=";
-      for (size_t i = 0; i < this->vife_.size(); i++) {
-        char item[8];
-        std::snprintf(item, sizeof(item), "0x%02X", this->vife_[i]);
-        if (i > 0) {
-          key += ",";
-        }
-        key += item;
-      }
-    }
-    return key;
   }
   // Shared dump_config() body for sensor/binary_sensor/text_sensor: DIF/VIF/VIF-extension/
   // function/storage/tariff/subunit/VIFE. Callers log their own LOG_SENSOR/LOG_BINARY_SENSOR/
@@ -333,13 +299,13 @@ class MBusComponent : public Component
   mbedtls_svc_key_id_t psa_key_id_{};
 
 #ifdef USE_MBUS_WIRED_UART
-  MBusWiredUartState wired_state_{MBusWiredUartState::IDLE};
+  MBusWiredUartState wired_state_{MBusWiredUartState::MBUS_WIRED_UART_STATE_IDLE};
   uint8_t wired_retry_count_{0};
   uint32_t wired_timer_{0};
   uint32_t wired_timeout_short_{0};
   uint32_t wired_timeout_long_{0};
   uint32_t wired_update_interval_{60000};
-  uint32_t wired_next_update_{0};
+  uint32_t wired_last_update_{0};
   std::vector<uint8_t> wired_rx_buffer_;
   size_t wired_expected_length_{0};
   bool wired_update_due_{false};

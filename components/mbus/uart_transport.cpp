@@ -10,7 +10,7 @@
 namespace esphome::mbus {
 
 #ifdef USE_MBUS_WIRED_UART
-static const char *const TAG = "mbus";
+ESPHOME_LOG_TAG(TAG, "mbus");
 
 static constexpr uint8_t MBUS_SHORT_START = 0x10;
 static constexpr uint8_t MBUS_LONG_START = 0x68;
@@ -19,7 +19,7 @@ static constexpr uint8_t MBUS_ADDRESS_NETWORK_LAYER = 0xFD;
 static constexpr uint8_t MBUS_CONTROL_SND_NKE = 0x40;
 static constexpr uint8_t MBUS_CONTROL_REQ_UD2 = 0x5B;
 static constexpr uint8_t MBUS_CONTROL_SELECT_SECONDARY = 0x73;
-static constexpr uint8_t MBUS_CI_SELECT_SLAVE = 0x52;
+static constexpr uint8_t MBUS_CI_SELECT_DEVICE = 0x52;
 static constexpr uint8_t MBUS_ACK = 0xE5;
 static_assert(static_cast<uint8_t>(MBUS_CONTROL_SND_NKE + MBUS_ADDRESS_NETWORK_LAYER) == 0x3D,
               "Unexpected SND_NKE checksum");
@@ -66,17 +66,17 @@ static uint8_t wired_sum_(const uint8_t *data, size_t length) {
 #ifdef USE_MBUS_WIRED_UART
 void MBusComponent::setup_wired_uart_() {
   this->check_uart_settings(2400, 1, uart::UART_CONFIG_PARITY_EVEN, 8);
-  this->wired_state_ = MBusWiredUartState::IDLE;
+  this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_IDLE;
   this->wired_retry_count_ = 0;
   this->wired_timer_ = 0;
   const uint32_t baud_rate = this->parent_->get_baud_rate();
   const uint32_t bit_time_us = baud_rate == 0 ? 1000 : 1000000UL / baud_rate;
   this->wired_timeout_short_ = ((330 + 11) * bit_time_us) / 1000 + 150;
   this->wired_timeout_long_ = ((330 + 11 + 11 * 512) * bit_time_us) / 1000 + 150;
-  this->wired_next_update_ = 0;
+  this->wired_last_update_ = 0;
   this->wired_rx_buffer_.clear();
   this->wired_expected_length_ = 0;
-  this->wired_update_due_ = false;
+  this->wired_update_due_ = true;
   ESP_LOGD(TAG, "Wired UART: state machine initialized");
 }
 
@@ -96,12 +96,12 @@ void MBusComponent::retry_wired_uart_(const char *reason) {
   }
   if (this->wired_retry_count_ > 0) {
     ESP_LOGD(TAG, "Wired UART: retrying after %s, retries left=%u", reason, this->wired_retry_count_);
-    this->wired_state_ = MBusWiredUartState::SEND_RESET_1;
+    this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_SEND_RESET_1;
     return;
   }
 
   ESP_LOGW(TAG, "Wired UART: failed after %s", reason);
-  this->wired_state_ = MBusWiredUartState::FAILED;
+  this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_FAILED;
 }
 
 std::array<uint8_t, 5> MBusComponent::build_wired_snd_nke_frame_() const {
@@ -116,8 +116,8 @@ std::array<uint8_t, 5> MBusComponent::build_wired_req_ud2_frame_() const {
 
 std::array<uint8_t, 17> MBusComponent::build_wired_select_secondary_frame_() const {
   std::array<uint8_t, 17> frame{
-      MBUS_LONG_START,     0x0B, 0x0B, MBUS_LONG_START, MBUS_CONTROL_SELECT_SECONDARY, MBUS_ADDRESS_NETWORK_LAYER,
-      MBUS_CI_SELECT_SLAVE};
+      MBUS_LONG_START,      0x0B, 0x0B, MBUS_LONG_START, MBUS_CONTROL_SELECT_SECONDARY, MBUS_ADDRESS_NETWORK_LAYER,
+      MBUS_CI_SELECT_DEVICE};
 
   // EN13757 secondary address payload: ID as little-endian BCD, then manufacturer/version/medium.
   frame[7] = static_cast<uint8_t>(this->secondary_address_ >> 32);
@@ -137,13 +137,13 @@ void MBusComponent::loop_wired_uart_() {
   const uint32_t now = App.get_loop_component_start_time();
 
   switch (this->wired_state_) {
-    case MBusWiredUartState::IDLE:
-      if (this->wired_update_due_ || now >= this->wired_next_update_) {
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_IDLE:
+      if (this->wired_update_due_ || now - this->wired_last_update_ >= this->wired_update_interval_) {
         this->wired_update_due_ = false;
-        this->wired_state_ = MBusWiredUartState::START;
+        this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_START;
       }
       return;
-    case MBusWiredUartState::START: {
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_START: {
       MBusComponent *owner = get_wired_uart_owner_(this->parent_);
       if (owner != nullptr && owner != this) {
         return;
@@ -151,42 +151,42 @@ void MBusComponent::loop_wired_uart_() {
       set_wired_uart_owner_(this->parent_, this);
       this->reset_wired_transaction_();
       this->wired_retry_count_ = WIRED_MAX_RETRIES;
-      this->wired_state_ = MBusWiredUartState::SEND_RESET_1;
+      this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_SEND_RESET_1;
       return;
     }
-    case MBusWiredUartState::SEND_RESET_1:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_SEND_RESET_1:
       this->write_array(this->build_wired_snd_nke_frame_().data(), 5);
       this->wired_timer_ = now;
-      this->wired_state_ = MBusWiredUartState::WAIT_RESET_1;
+      this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_RESET_1;
       return;
-    case MBusWiredUartState::WAIT_RESET_1:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_RESET_1:
       if (this->wired_timeout_elapsed_(now, this->wired_timeout_short_)) {
-        this->wired_state_ = MBusWiredUartState::SEND_RESET_2;
+        this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_SEND_RESET_2;
       }
       return;
-    case MBusWiredUartState::SEND_RESET_2:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_SEND_RESET_2:
       this->write_array(this->build_wired_snd_nke_frame_().data(), 5);
       this->wired_timer_ = now;
-      this->wired_state_ = MBusWiredUartState::WAIT_RESET_2;
+      this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_RESET_2;
       return;
-    case MBusWiredUartState::WAIT_RESET_2:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_RESET_2:
       if (this->wired_timeout_elapsed_(now, this->wired_timeout_short_)) {
-        this->wired_state_ = MBusWiredUartState::PURGE_RX;
+        this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_PURGE_RX;
       }
       return;
-    case MBusWiredUartState::PURGE_RX:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_PURGE_RX:
       while (this->available() > 0) {
         uint8_t byte;
         this->read_byte(&byte);
       }
-      this->wired_state_ = MBusWiredUartState::SEND_SELECT_SECONDARY;
+      this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_SEND_SELECT_SECONDARY;
       return;
-    case MBusWiredUartState::SEND_SELECT_SECONDARY:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_SEND_SELECT_SECONDARY:
       this->write_array(this->build_wired_select_secondary_frame_().data(), 17);
       this->wired_timer_ = now;
-      this->wired_state_ = MBusWiredUartState::WAIT_SELECT_ACK;
+      this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_SELECT_ACK;
       return;
-    case MBusWiredUartState::WAIT_SELECT_ACK:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_SELECT_ACK:
       if (this->available() == 0) {
         if (this->wired_timeout_elapsed_(now, this->wired_timeout_short_)) {
           this->retry_wired_uart_("select ACK timeout");
@@ -205,23 +205,23 @@ void MBusComponent::loop_wired_uart_() {
         }
       }
       this->wired_timer_ = now;
-      this->wired_state_ = MBusWiredUartState::WAIT_SELECT_SETTLE;
+      this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_SELECT_SETTLE;
       return;
-    case MBusWiredUartState::WAIT_SELECT_SETTLE:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_SELECT_SETTLE:
       if (this->available() > 0) {
         this->retry_wired_uart_("select settle collision");
         return;
       }
       if (this->wired_timeout_elapsed_(now, this->wired_timeout_short_)) {
-        this->wired_state_ = MBusWiredUartState::SEND_REQ_UD2;
+        this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_SEND_REQ_UD2;
       }
       return;
-    case MBusWiredUartState::SEND_REQ_UD2:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_SEND_REQ_UD2:
       this->write_array(this->build_wired_req_ud2_frame_().data(), 5);
       this->wired_timer_ = now;
-      this->wired_state_ = MBusWiredUartState::WAIT_RESPONSE_HEADER;
+      this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_RESPONSE_HEADER;
       return;
-    case MBusWiredUartState::WAIT_RESPONSE_HEADER:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_RESPONSE_HEADER:
       if (this->wired_timeout_elapsed_(now, this->wired_timeout_long_)) {
         this->retry_wired_uart_("response header timeout");
         return;
@@ -240,9 +240,9 @@ void MBusComponent::loop_wired_uart_() {
         return;
       }
       this->wired_expected_length_ = static_cast<size_t>(this->wired_rx_buffer_[1]) + 6;
-      this->wired_state_ = MBusWiredUartState::WAIT_RESPONSE_BODY;
+      this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_RESPONSE_BODY;
       return;
-    case MBusWiredUartState::WAIT_RESPONSE_BODY:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_RESPONSE_BODY:
       if (this->wired_timeout_elapsed_(now, this->wired_timeout_long_)) {
         this->retry_wired_uart_("response body timeout");
         return;
@@ -266,26 +266,26 @@ void MBusComponent::loop_wired_uart_() {
         this->retry_wired_uart_("invalid response frame");
         return;
       }
-      this->wired_state_ = MBusWiredUartState::DONE;
+      this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_DONE;
       return;
-    case MBusWiredUartState::DONE:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_DONE:
       this->reset_wired_transaction_();
-      this->wired_next_update_ = now + this->wired_update_interval_;
+      this->wired_last_update_ = now;
       if (get_wired_uart_owner_(this->parent_) == this) {
         set_wired_uart_owner_(this->parent_, nullptr);
       }
-      this->wired_state_ = MBusWiredUartState::IDLE;
+      this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_IDLE;
       return;
-    case MBusWiredUartState::RETRY:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_RETRY:
       this->retry_wired_uart_("retry state");
       return;
-    case MBusWiredUartState::FAILED:
+    case MBusWiredUartState::MBUS_WIRED_UART_STATE_FAILED:
       this->reset_wired_transaction_();
-      this->wired_next_update_ = now + this->wired_update_interval_;
+      this->wired_last_update_ = now;
       if (get_wired_uart_owner_(this->parent_) == this) {
         set_wired_uart_owner_(this->parent_, nullptr);
       }
-      this->wired_state_ = MBusWiredUartState::IDLE;
+      this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_IDLE;
       return;
   }
 
@@ -293,7 +293,7 @@ void MBusComponent::loop_wired_uart_() {
   if (get_wired_uart_owner_(this->parent_) == this) {
     set_wired_uart_owner_(this->parent_, nullptr);
   }
-  this->wired_state_ = MBusWiredUartState::IDLE;
+  this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_IDLE;
 }
 #endif
 

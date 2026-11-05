@@ -1,6 +1,5 @@
 #include "mbus.h"
 
-#include "esphome/core/alloc_helpers.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
@@ -8,7 +7,7 @@
 
 namespace esphome::mbus {
 
-static const char *const TAG = "mbus";
+ESPHOME_LOG_TAG(TAG, "mbus");
 
 // Imports encryption_key_ into PSA once, from setup(). Every decrypt_mode_5_() call afterwards reuses
 // the cached key handle instead of importing/destroying a PSA key for every received telegram.
@@ -44,7 +43,10 @@ bool MBusComponent::decrypt_mode_5_(const MBusApplicationFrame &frame, size_t pa
   uint8_t iv[16];
   std::copy_n(frame.meter_address.data(), frame.meter_address.size(), iv);
   std::fill_n(iv + 8, 8, access_number);
-  ESP_LOGV(TAG, "Mode 5 IV: %s", format_hex_pretty(iv, sizeof(iv)).c_str());
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
+  char hex[format_hex_pretty_size(sizeof(iv))];
+  ESP_LOGV(TAG, "Mode 5 IV: %s", format_hex_pretty_to(hex, iv, sizeof(iv)));
+#endif
 
   std::vector<uint8_t> ciphertext(frame.data + payload_offset, frame.data + payload_offset + encrypted_length);
   out->assign(encrypted_length, 0);
