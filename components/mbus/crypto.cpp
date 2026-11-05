@@ -14,7 +14,8 @@ ESPHOME_LOG_TAG(TAG, "mbus");
 void MBusComponent::import_psa_key_() {
   psa_status_t status = psa_crypto_init();
   if (status != PSA_SUCCESS) {
-    ESP_LOGW(TAG, "Mode 5 decrypt psa_crypto_init failed: status=%d", static_cast<int>(status));
+    ESP_LOGE(TAG, "psa_crypto_init failed: status=%d", static_cast<int>(status));
+    this->mark_failed(LOG_STR("Crypto init failed"));
     return;
   }
 
@@ -26,8 +27,11 @@ void MBusComponent::import_psa_key_() {
 
   status = psa_import_key(&attributes, this->encryption_key_.data(), this->encryption_key_.size(), &this->psa_key_id_);
   psa_reset_key_attributes(&attributes);
+  // PSA keeps its own copy; the plain key is not needed in RAM any more
+  this->encryption_key_.fill(0);
   if (status != PSA_SUCCESS) {
-    ESP_LOGW(TAG, "Mode 5 decrypt psa_import_key failed: status=%d", static_cast<int>(status));
+    ESP_LOGE(TAG, "psa_import_key failed: status=%d", static_cast<int>(status));
+    this->mark_failed(LOG_STR("Encryption key import failed"));
     return;
   }
   this->has_psa_key_ = true;
