@@ -93,6 +93,7 @@ sx127x:
   bitrate: 100000
   deviation: 38kHz
   bandwidth: 250_0kHz
+  afc_bandwidth: 250_0kHz
 
   # --- Sync / framing
   sync_value: [0x54, 0x3D]

@@ -12,6 +12,7 @@ DEPENDENCIES = ["spi"]
 
 CONF_SX127X_ID = "sx127x_id"
 
+CONF_AFC_BANDWIDTH = "afc_bandwidth"
 CONF_AUTO_CAL = "auto_cal"
 CONF_BANDWIDTH = "bandwidth"
 CONF_BITRATE = "bitrate"
@@ -176,9 +177,15 @@ def validate_config(config):
             raise cv.Invalid("payload_length_lambda is not available with LORA")
         if CONF_DIO1_PIN in config:
             raise cv.Invalid("dio1_pin is not available with LORA")
+        if CONF_AFC_BANDWIDTH in config:
+            raise cv.Invalid("afc_bandwidth is not available with LORA")
     else:
         if config[CONF_BANDWIDTH] == "500_0kHz":
             raise cv.Invalid(f"{config[CONF_BANDWIDTH]} is only available with LORA")
+        if CONF_AFC_BANDWIDTH in config and config[CONF_AFC_BANDWIDTH] == "500_0kHz":
+            raise cv.Invalid(
+                f"{config[CONF_AFC_BANDWIDTH]} is not available with FSK/OOK"
+            )
         if CONF_BITSYNC not in config:
             raise cv.Invalid("Config 'bitsync' required with FSK/OOK")
         if CONF_PACKET_MODE not in config:
@@ -222,6 +229,7 @@ CONFIG_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(SX127x),
+            cv.Optional(CONF_AFC_BANDWIDTH): cv.enum(BW),
             cv.Optional(CONF_AUTO_CAL, default=True): cv.boolean,
             cv.Optional(CONF_BANDWIDTH, default="125_0kHz"): cv.enum(BW),
             cv.Optional(CONF_BITRATE, default=4800): cv.int_range(min=500, max=300000),
@@ -288,6 +296,8 @@ async def to_code(config):
     cg.add(var.set_rst_pin(rst_pin))
     cg.add(var.set_auto_cal(config[CONF_AUTO_CAL]))
     cg.add(var.set_bandwidth(config[CONF_BANDWIDTH]))
+    if CONF_AFC_BANDWIDTH in config:
+        cg.add(var.set_afc_bandwidth(config[CONF_AFC_BANDWIDTH]))
     cg.add(var.set_frequency(config[CONF_FREQUENCY]))
     cg.add(var.set_deviation(config[CONF_DEVIATION]))
     cg.add(var.set_modulation(config[CONF_MODULATION]))

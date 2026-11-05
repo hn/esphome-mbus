@@ -82,7 +82,9 @@ either chip:
 - `cc1101` — long-packet RX — [esphome/esphome#17578](https://github.com/esphome/esphome/pull/17578),
   pending review.
 - `sx127x` — long-packet RX plus real RSSI for FSK/OOK —
-  [esphome/esphome#18547](https://github.com/esphome/esphome/pull/18547), pending review.
+  [esphome/esphome#18547](https://github.com/esphome/esphome/pull/18547), pending review; plus the
+  `afc_bandwidth` option — [esphome/esphome#22300](https://github.com/esphome/esphome/pull/22300), pending
+  review.
 
 Both patches are pending review and may be rejected, changed significantly, or take a while either way —
 there's no guarantee they'll be merged as-is, or at all. If and when one lands
