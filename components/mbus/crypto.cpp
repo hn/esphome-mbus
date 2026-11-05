@@ -1,104 +1,104 @@
-#include "mbus.h"
+#include "crypto.h"
 
-#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
-#include <algorithm>
+#include <cstring>
 
 namespace esphome::mbus {
 
 ESPHOME_LOG_TAG(TAG, "mbus");
 
-// Imports encryption_key_ into PSA once, from setup(). Every decrypt_mode_5_() call afterwards reuses
-// the cached key handle instead of importing/destroying a PSA key for every received telegram.
-void MBusComponent::import_psa_key_() {
+#if defined(MBUS_AES_PSA)
+
+bool Aes128CbcDecryptor::set_key(const uint8_t *key) {
   psa_status_t status = psa_crypto_init();
   if (status != PSA_SUCCESS) {
     ESP_LOGE(TAG, "psa_crypto_init failed: status=%d", static_cast<int>(status));
-    this->mark_failed(LOG_STR("Crypto init failed"));
-    return;
-  }
-
-  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
-  psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&attributes, 128);
-  psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_DECRYPT);
-  psa_set_key_algorithm(&attributes, PSA_ALG_CBC_NO_PADDING);
-
-  status = psa_import_key(&attributes, this->encryption_key_.data(), this->encryption_key_.size(), &this->psa_key_id_);
-  psa_reset_key_attributes(&attributes);
-  // PSA keeps its own copy; the plain key is not needed in RAM any more
-  this->encryption_key_.fill(0);
-  if (status != PSA_SUCCESS) {
-    ESP_LOGE(TAG, "psa_import_key failed: status=%d", static_cast<int>(status));
-    this->mark_failed(LOG_STR("Encryption key import failed"));
-    return;
-  }
-  this->has_psa_key_ = true;
-}
-
-bool MBusComponent::decrypt_mode_5_(const MBusApplicationFrame &frame, size_t payload_offset, size_t encrypted_length,
-                                    uint8_t access_number, std::vector<uint8_t> *out) const {
-  if (!this->has_psa_key_ || !frame.has_meter_address || frame.data == nullptr ||
-      payload_offset + encrypted_length > frame.length || encrypted_length % 16 != 0) {
     return false;
   }
-
-  uint8_t iv[16];
-  std::copy_n(frame.meter_address.data(), frame.meter_address.size(), iv);
-  std::fill_n(iv + 8, 8, access_number);
-#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
-  char hex[format_hex_pretty_size(sizeof(iv))];
-  ESP_LOGV(TAG, "Mode 5 IV: %s", format_hex_pretty_to(hex, iv, sizeof(iv)));
-#endif
-
-  std::vector<uint8_t> ciphertext(frame.data + payload_offset, frame.data + payload_offset + encrypted_length);
-  out->assign(encrypted_length, 0);
-
-  psa_cipher_operation_t operation = PSA_CIPHER_OPERATION_INIT;
-  psa_status_t status = psa_cipher_decrypt_setup(&operation, this->psa_key_id_, PSA_ALG_CBC_NO_PADDING);
+  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+  psa_set_key_bits(&attributes, KEY_SIZE * 8);
+  psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_DECRYPT);
+  psa_set_key_algorithm(&attributes, PSA_ALG_CBC_NO_PADDING);
+  status = psa_import_key(&attributes, key, KEY_SIZE, &this->key_id_);
+  psa_reset_key_attributes(&attributes);
   if (status != PSA_SUCCESS) {
-    ESP_LOGW(TAG, "Mode 5 decrypt psa_cipher_decrypt_setup failed: status=%d", static_cast<int>(status));
-  } else {
-    ESP_LOGVV(TAG, "Mode 5 decrypt psa_cipher_decrypt_setup status=%d", static_cast<int>(status));
+    ESP_LOGE(TAG, "psa_import_key failed: status=%d", static_cast<int>(status));
+    return false;
   }
-  if (status == PSA_SUCCESS) {
-    status = psa_cipher_set_iv(&operation, iv, sizeof(iv));
-    if (status != PSA_SUCCESS) {
-      ESP_LOGW(TAG, "Mode 5 decrypt psa_cipher_set_iv failed: status=%d", static_cast<int>(status));
-    } else {
-      ESP_LOGVV(TAG, "Mode 5 decrypt psa_cipher_set_iv status=%d", static_cast<int>(status));
-    }
-  }
+  this->has_key_ = true;
+  return true;
+}
 
+bool Aes128CbcDecryptor::decrypt(const uint8_t *iv, const uint8_t *in, uint8_t *out, size_t length) {
+  if (!this->has_key_ || length % BLOCK_SIZE != 0) {
+    return false;
+  }
+  psa_cipher_operation_t operation = PSA_CIPHER_OPERATION_INIT;
   size_t output_length = 0;
   size_t finish_length = 0;
+  psa_status_t status = psa_cipher_decrypt_setup(&operation, this->key_id_, PSA_ALG_CBC_NO_PADDING);
   if (status == PSA_SUCCESS) {
-    status =
-        psa_cipher_update(&operation, ciphertext.data(), ciphertext.size(), out->data(), out->size(), &output_length);
-    if (status != PSA_SUCCESS) {
-      ESP_LOGW(TAG, "Mode 5 decrypt psa_cipher_update failed: status=%d output=%u", static_cast<int>(status),
-               static_cast<unsigned>(output_length));
-    } else {
-      ESP_LOGVV(TAG, "Mode 5 decrypt psa_cipher_update status=%d output=%u", static_cast<int>(status),
-                static_cast<unsigned>(output_length));
-    }
+    status = psa_cipher_set_iv(&operation, iv, BLOCK_SIZE);
   }
   if (status == PSA_SUCCESS) {
-    status = psa_cipher_finish(&operation, out->data() + output_length, out->size() - output_length, &finish_length);
-    if (status != PSA_SUCCESS) {
-      ESP_LOGW(TAG, "Mode 5 decrypt psa_cipher_finish failed: status=%d output=%u", static_cast<int>(status),
-               static_cast<unsigned>(finish_length));
-    } else {
-      ESP_LOGVV(TAG, "Mode 5 decrypt psa_cipher_finish status=%d output=%u", static_cast<int>(status),
-                static_cast<unsigned>(finish_length));
-    }
+    status = psa_cipher_update(&operation, in, length, out, length, &output_length);
   }
-
+  if (status == PSA_SUCCESS) {
+    status = psa_cipher_finish(&operation, out + output_length, length - output_length, &finish_length);
+  }
   psa_cipher_abort(&operation);
-  ESP_LOGVV(TAG, "Mode 5 decrypt final status=%d output=%u expected=%u", static_cast<int>(status),
-            static_cast<unsigned>(output_length + finish_length), static_cast<unsigned>(out->size()));
-  return status == PSA_SUCCESS && output_length + finish_length == out->size();
+  if (status != PSA_SUCCESS) {
+    ESP_LOGW(TAG, "PSA decrypt failed: status=%d", static_cast<int>(status));
+    return false;
+  }
+  return output_length + finish_length == length;
 }
+
+#elif defined(MBUS_AES_MBEDTLS)
+
+bool Aes128CbcDecryptor::set_key(const uint8_t *key) {
+  mbedtls_aes_init(&this->context_);
+  const int result = mbedtls_aes_setkey_dec(&this->context_, key, KEY_SIZE * 8);
+  if (result != 0) {
+    ESP_LOGE(TAG, "mbedtls_aes_setkey_dec failed: %d", result);
+    return false;
+  }
+  this->has_key_ = true;
+  return true;
+}
+
+bool Aes128CbcDecryptor::decrypt(const uint8_t *iv, const uint8_t *in, uint8_t *out, size_t length) {
+  if (!this->has_key_ || length % BLOCK_SIZE != 0) {
+    return false;
+  }
+  // mbedTLS advances the IV in place
+  uint8_t iv_copy[BLOCK_SIZE];
+  std::memcpy(iv_copy, iv, BLOCK_SIZE);
+  return mbedtls_aes_crypt_cbc(&this->context_, MBEDTLS_AES_DECRYPT, length, iv_copy, in, out) == 0;
+}
+
+#else  // MBUS_AES_BEARSSL
+
+bool Aes128CbcDecryptor::set_key(const uint8_t *key) {
+  br_aes_ct_cbcdec_init(&this->context_, key, KEY_SIZE);
+  this->has_key_ = true;
+  return true;
+}
+
+bool Aes128CbcDecryptor::decrypt(const uint8_t *iv, const uint8_t *in, uint8_t *out, size_t length) {
+  if (!this->has_key_ || length % BLOCK_SIZE != 0) {
+    return false;
+  }
+  // BearSSL decrypts in place and advances the IV
+  uint8_t iv_copy[BLOCK_SIZE];
+  std::memcpy(iv_copy, iv, BLOCK_SIZE);
+  std::memcpy(out, in, length);
+  br_aes_ct_cbcdec_run(&this->context_, iv_copy, out, length);
+  return true;
+}
+
+#endif
 
 }  // namespace esphome::mbus

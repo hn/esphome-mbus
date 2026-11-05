@@ -174,4 +174,32 @@ void MBusComponent::handle_application_frame_(const MBusApplicationFrame &frame)
   ESP_LOGW(TAG, "Application CI=0x%02X not implemented yet", frame.ci);
 }
 
+// Called once from setup(); the plain key is wiped afterwards because the decryptor keeps its own form of it.
+void MBusComponent::init_decryptor_() {
+  const bool ok = this->decryptor_.set_key(this->encryption_key_.data());
+  this->encryption_key_.fill(0);
+  if (!ok) {
+    this->mark_failed(LOG_STR("Encryption key setup failed"));
+  }
+}
+
+bool MBusComponent::decrypt_mode_5_(const MBusApplicationFrame &frame, size_t payload_offset, size_t encrypted_length,
+                                    uint8_t access_number, std::vector<uint8_t> *out) {
+  if (!frame.has_meter_address || frame.data == nullptr || payload_offset + encrypted_length > frame.length) {
+    return false;
+  }
+
+  // Mode 5 IV: manufacturer, address, version and device type (8 bytes), then the access number 8 times
+  uint8_t iv[Aes128CbcDecryptor::BLOCK_SIZE];
+  std::copy_n(frame.meter_address.data(), frame.meter_address.size(), iv);
+  std::fill_n(iv + 8, 8, access_number);
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
+  char hex[format_hex_pretty_size(sizeof(iv))];
+  ESP_LOGV(TAG, "Mode 5 IV: %s", format_hex_pretty_to(hex, iv, sizeof(iv)));
+#endif
+
+  out->assign(encrypted_length, 0);
+  return this->decryptor_.decrypt(iv, frame.data + payload_offset, out->data(), encrypted_length);
+}
+
 }  // namespace esphome::mbus

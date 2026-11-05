@@ -105,8 +105,8 @@ for more background.
 
 ## Configuration Example
 
-`mbus` runs on ESP32 (it uses ESP-IDF's PSA crypto for mode 5 decryption). `encryption_key` is the meter's
-AES key as 32 hex characters.
+`mbus` builds for ESP32, ESP8266 and RP2040; so far it has only been tested on real ESP32 hardware.
+`encryption_key` is the meter's AES key as 32 hex characters.
 
 ```yaml
 external_components:

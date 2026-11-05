@@ -29,7 +29,7 @@ void MBusComponent::setup() {
   }
 #endif
   if (this->has_encryption_key_) {
-    this->import_psa_key_();
+    this->init_decryptor_();
   }
 }
 

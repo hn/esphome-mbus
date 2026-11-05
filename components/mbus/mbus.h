@@ -16,7 +16,7 @@
 #include "esphome/components/uart/uart.h"
 #endif
 
-#include <psa/crypto.h>
+#include "crypto.h"
 
 #include <array>
 #include <cstdio>
@@ -292,10 +292,8 @@ class MBusComponent : public Component
   bool dump_records_enabled_{false};
   std::vector<MBusRecordListener *> record_listeners_;
 
-  // Imported once in setup() from encryption_key_ and reused for every decrypt, instead of importing/
-  // destroying a PSA key for every received telegram.
-  bool has_psa_key_{false};
-  mbedtls_svc_key_id_t psa_key_id_{};
+  // Set up once in setup() from encryption_key_ and reused for every telegram
+  Aes128CbcDecryptor decryptor_;
 
 #ifdef USE_MBUS_WIRED_UART
   MBusWiredUartState wired_state_{MBusWiredUartState::MBUS_WIRED_UART_STATE_IDLE};
@@ -324,9 +322,9 @@ class MBusComponent : public Component
   void handle_application_frame_(const MBusApplicationFrame &frame);
   void handle_short_application_frame_(const MBusApplicationFrame &frame);
   bool handle_wired_link_frame_(const std::vector<uint8_t> &frame, const MBusReceiveMeta &meta = {});
-  void import_psa_key_();
+  void init_decryptor_();
   bool decrypt_mode_5_(const MBusApplicationFrame &frame, size_t payload_offset, size_t encrypted_length,
-                       uint8_t access_number, std::vector<uint8_t> *out) const;
+                       uint8_t access_number, std::vector<uint8_t> *out);
   // Calls callback(const MBusRecord &) for every record; defined and only used in records.cpp
   template<typename F> void parse_records_(const std::vector<uint8_t> &payload, F &&callback) const;
   void process_records_(const std::vector<uint8_t> &payload) const;

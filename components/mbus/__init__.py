@@ -1,7 +1,14 @@
 import esphome.codegen as cg
 from esphome.components import cc1101, sx126x, sx127x, uart
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_STORAGE, CONF_UPDATE_INTERVAL
+from esphome.const import (
+    CONF_ID,
+    CONF_STORAGE,
+    CONF_UPDATE_INTERVAL,
+    PLATFORM_ESP32,
+    PLATFORM_ESP8266,
+    PLATFORM_RP2040,
+)
 from esphome.cpp_generator import MockObj
 from esphome.types import ConfigType
 
@@ -62,8 +69,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_DUMP_RECORDS, default=False): cv.boolean,
         }
     ).extend(cv.COMPONENT_SCHEMA),
-    # Mode 5 decryption uses PSA crypto from ESP-IDF
-    cv.only_on_esp32,
+    # Mode 5 decryption needs PSA/mbedTLS (ESP32) or BearSSL (ESP8266, RP2040)
+    cv.only_on([PLATFORM_ESP32, PLATFORM_ESP8266, PLATFORM_RP2040]),
     cv.has_exactly_one_key(*SOURCE_KEYS),
     validate_source_options,
 )
