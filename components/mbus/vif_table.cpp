@@ -1,5 +1,9 @@
 #include "vif_table.h"
 
+#include "esphome/core/hal.h"
+#include "esphome/core/log.h"
+#include "esphome/core/progmem.h"
+
 #include <cmath>
 #include <cstdio>
 
@@ -56,165 +60,191 @@ bool vif_is_datetime(uint16_t vif_key) {
   return vif_key == 0x6C || vif_key == 0x6D || vif_key == 0x7D30 || vif_key == 0x7D70;
 }
 
+PROGMEM_STRING_TABLE(VifUnits, "Wh", "J", "m3", "kg", "s", "W", "J/h", "m3/h", "m3/min", "m3/s", "kg/h", "degC", "K",
+                     "bar", "datetime", "hca", "", "flags", "V", "unknown");
+static constexpr uint8_t VIF_UNIT_WH = 0;
+static constexpr uint8_t VIF_UNIT_J = 1;
+static constexpr uint8_t VIF_UNIT_M3 = 2;
+static constexpr uint8_t VIF_UNIT_KG = 3;
+static constexpr uint8_t VIF_UNIT_S = 4;
+static constexpr uint8_t VIF_UNIT_W = 5;
+static constexpr uint8_t VIF_UNIT_J_H = 6;
+static constexpr uint8_t VIF_UNIT_M3_H = 7;
+static constexpr uint8_t VIF_UNIT_M3_MIN = 8;
+static constexpr uint8_t VIF_UNIT_M3_S = 9;
+static constexpr uint8_t VIF_UNIT_KG_H = 10;
+static constexpr uint8_t VIF_UNIT_DEGC = 11;
+static constexpr uint8_t VIF_UNIT_K = 12;
+static constexpr uint8_t VIF_UNIT_BAR = 13;
+static constexpr uint8_t VIF_UNIT_DATETIME = 14;
+static constexpr uint8_t VIF_UNIT_HCA = 15;
+static constexpr uint8_t VIF_UNIT_NONE = 16;
+static constexpr uint8_t VIF_UNIT_FLAGS = 17;
+static constexpr uint8_t VIF_UNIT_V = 18;
+static constexpr uint8_t VIF_UNIT_UNKNOWN = 19;
+
 struct VifScaleUnit {
   uint16_t key;
   double scale;
-  const char *unit;
+  uint8_t unit;
 };
 
-static constexpr VifScaleUnit VIF_SCALE_UNITS[] = {
-    {0x00, 1.0e-3, "Wh"},
-    {0x01, 1.0e-2, "Wh"},
-    {0x02, 1.0e-1, "Wh"},
-    {0x03, 1.0e0, "Wh"},
-    {0x04, 1.0e1, "Wh"},
-    {0x05, 1.0e2, "Wh"},
-    {0x06, 1.0e3, "Wh"},
-    {0x07, 1.0e4, "Wh"},
-    {0x08, 1.0e0, "J"},
-    {0x09, 1.0e1, "J"},
-    {0x0A, 1.0e2, "J"},
-    {0x0B, 1.0e3, "J"},
-    {0x0C, 1.0e4, "J"},
-    {0x0D, 1.0e5, "J"},
-    {0x0E, 1.0e6, "J"},
-    {0x0F, 1.0e7, "J"},
-    {0x10, 1.0e-6, "m3"},
-    {0x11, 1.0e-5, "m3"},
-    {0x12, 1.0e-4, "m3"},
-    {0x13, 1.0e-3, "m3"},
-    {0x14, 1.0e-2, "m3"},
-    {0x15, 1.0e-1, "m3"},
-    {0x16, 1.0e0, "m3"},
-    {0x17, 1.0e1, "m3"},
-    {0x18, 1.0e-3, "kg"},
-    {0x19, 1.0e-2, "kg"},
-    {0x1A, 1.0e-1, "kg"},
-    {0x1B, 1.0e0, "kg"},
-    {0x1C, 1.0e1, "kg"},
-    {0x1D, 1.0e2, "kg"},
-    {0x1E, 1.0e3, "kg"},
-    {0x1F, 1.0e4, "kg"},
-    {0x20, 1.0, "s"},
-    {0x21, 60.0, "s"},
-    {0x22, 3600.0, "s"},
-    {0x23, 86400.0, "s"},
-    {0x24, 1.0, "s"},
-    {0x25, 60.0, "s"},
-    {0x26, 3600.0, "s"},
-    {0x27, 86400.0, "s"},
-    {0x28, 1.0e-3, "W"},
-    {0x29, 1.0e-2, "W"},
-    {0x2A, 1.0e-1, "W"},
-    {0x2B, 1.0e0, "W"},
-    {0x2C, 1.0e1, "W"},
-    {0x2D, 1.0e2, "W"},
-    {0x2E, 1.0e3, "W"},
-    {0x2F, 1.0e4, "W"},
-    {0x30, 1.0e0, "J/h"},
-    {0x31, 1.0e1, "J/h"},
-    {0x32, 1.0e2, "J/h"},
-    {0x33, 1.0e3, "J/h"},
-    {0x34, 1.0e4, "J/h"},
-    {0x35, 1.0e5, "J/h"},
-    {0x36, 1.0e6, "J/h"},
-    {0x37, 1.0e7, "J/h"},
-    {0x38, 1.0e-6, "m3/h"},
-    {0x39, 1.0e-5, "m3/h"},
-    {0x3A, 1.0e-4, "m3/h"},
-    {0x3B, 1.0e-3, "m3/h"},
-    {0x3C, 1.0e-2, "m3/h"},
-    {0x3D, 1.0e-1, "m3/h"},
-    {0x3E, 1.0e0, "m3/h"},
-    {0x3F, 1.0e1, "m3/h"},
-    {0x40, 1.0e-7, "m3/min"},
-    {0x41, 1.0e-6, "m3/min"},
-    {0x42, 1.0e-5, "m3/min"},
-    {0x43, 1.0e-4, "m3/min"},
-    {0x44, 1.0e-3, "m3/min"},
-    {0x45, 1.0e-2, "m3/min"},
-    {0x46, 1.0e-1, "m3/min"},
-    {0x47, 1.0e0, "m3/min"},
-    {0x48, 1.0e-9, "m3/s"},
-    {0x49, 1.0e-8, "m3/s"},
-    {0x4A, 1.0e-7, "m3/s"},
-    {0x4B, 1.0e-6, "m3/s"},
-    {0x4C, 1.0e-5, "m3/s"},
-    {0x4D, 1.0e-4, "m3/s"},
-    {0x4E, 1.0e-3, "m3/s"},
-    {0x4F, 1.0e-2, "m3/s"},
-    {0x50, 1.0e-3, "kg/h"},
-    {0x51, 1.0e-2, "kg/h"},
-    {0x52, 1.0e-1, "kg/h"},
-    {0x53, 1.0e0, "kg/h"},
-    {0x54, 1.0e1, "kg/h"},
-    {0x55, 1.0e2, "kg/h"},
-    {0x56, 1.0e3, "kg/h"},
-    {0x57, 1.0e4, "kg/h"},
-    {0x58, 1.0e-3, "degC"},
-    {0x59, 1.0e-2, "degC"},
-    {0x5A, 1.0e-1, "degC"},
-    {0x5B, 1.0e0, "degC"},
-    {0x5C, 1.0e-3, "degC"},
-    {0x5D, 1.0e-2, "degC"},
-    {0x5E, 1.0e-1, "degC"},
-    {0x5F, 1.0e0, "degC"},
-    {0x60, 1.0e-3, "K"},
-    {0x61, 1.0e-2, "K"},
-    {0x62, 1.0e-1, "K"},
-    {0x63, 1.0e0, "K"},
-    {0x64, 1.0e-3, "degC"},
-    {0x65, 1.0e-2, "degC"},
-    {0x66, 1.0e-1, "degC"},
-    {0x67, 1.0e0, "degC"},
-    {0x68, 1.0e-3, "bar"},
-    {0x69, 1.0e-2, "bar"},
-    {0x6A, 1.0e-1, "bar"},
-    {0x6B, 1.0e0, "bar"},
-    {0x6C, 1.0, "datetime"},
-    {0x6D, 1.0, "datetime"},
-    {0x6E, 1.0, "hca"},
-    {0x70, 1.0, "s"},
-    {0x71, 60.0, "s"},
-    {0x72, 3600.0, "s"},
-    {0x73, 86400.0, "s"},
-    {0x74, 1.0, "s"},
-    {0x75, 60.0, "s"},
-    {0x76, 3600.0, "s"},
-    {0x77, 86400.0, "s"},
-    {0x78, 1.0, ""},
-    {0x79, 1.0, ""},
-    {0x7A, 1.0, ""},
+static constexpr VifScaleUnit VIF_SCALE_UNITS[] PROGMEM = {
+    {0x00, 1.0e-3, VIF_UNIT_WH},
+    {0x01, 1.0e-2, VIF_UNIT_WH},
+    {0x02, 1.0e-1, VIF_UNIT_WH},
+    {0x03, 1.0e0, VIF_UNIT_WH},
+    {0x04, 1.0e1, VIF_UNIT_WH},
+    {0x05, 1.0e2, VIF_UNIT_WH},
+    {0x06, 1.0e3, VIF_UNIT_WH},
+    {0x07, 1.0e4, VIF_UNIT_WH},
+    {0x08, 1.0e0, VIF_UNIT_J},
+    {0x09, 1.0e1, VIF_UNIT_J},
+    {0x0A, 1.0e2, VIF_UNIT_J},
+    {0x0B, 1.0e3, VIF_UNIT_J},
+    {0x0C, 1.0e4, VIF_UNIT_J},
+    {0x0D, 1.0e5, VIF_UNIT_J},
+    {0x0E, 1.0e6, VIF_UNIT_J},
+    {0x0F, 1.0e7, VIF_UNIT_J},
+    {0x10, 1.0e-6, VIF_UNIT_M3},
+    {0x11, 1.0e-5, VIF_UNIT_M3},
+    {0x12, 1.0e-4, VIF_UNIT_M3},
+    {0x13, 1.0e-3, VIF_UNIT_M3},
+    {0x14, 1.0e-2, VIF_UNIT_M3},
+    {0x15, 1.0e-1, VIF_UNIT_M3},
+    {0x16, 1.0e0, VIF_UNIT_M3},
+    {0x17, 1.0e1, VIF_UNIT_M3},
+    {0x18, 1.0e-3, VIF_UNIT_KG},
+    {0x19, 1.0e-2, VIF_UNIT_KG},
+    {0x1A, 1.0e-1, VIF_UNIT_KG},
+    {0x1B, 1.0e0, VIF_UNIT_KG},
+    {0x1C, 1.0e1, VIF_UNIT_KG},
+    {0x1D, 1.0e2, VIF_UNIT_KG},
+    {0x1E, 1.0e3, VIF_UNIT_KG},
+    {0x1F, 1.0e4, VIF_UNIT_KG},
+    {0x20, 1.0, VIF_UNIT_S},
+    {0x21, 60.0, VIF_UNIT_S},
+    {0x22, 3600.0, VIF_UNIT_S},
+    {0x23, 86400.0, VIF_UNIT_S},
+    {0x24, 1.0, VIF_UNIT_S},
+    {0x25, 60.0, VIF_UNIT_S},
+    {0x26, 3600.0, VIF_UNIT_S},
+    {0x27, 86400.0, VIF_UNIT_S},
+    {0x28, 1.0e-3, VIF_UNIT_W},
+    {0x29, 1.0e-2, VIF_UNIT_W},
+    {0x2A, 1.0e-1, VIF_UNIT_W},
+    {0x2B, 1.0e0, VIF_UNIT_W},
+    {0x2C, 1.0e1, VIF_UNIT_W},
+    {0x2D, 1.0e2, VIF_UNIT_W},
+    {0x2E, 1.0e3, VIF_UNIT_W},
+    {0x2F, 1.0e4, VIF_UNIT_W},
+    {0x30, 1.0e0, VIF_UNIT_J_H},
+    {0x31, 1.0e1, VIF_UNIT_J_H},
+    {0x32, 1.0e2, VIF_UNIT_J_H},
+    {0x33, 1.0e3, VIF_UNIT_J_H},
+    {0x34, 1.0e4, VIF_UNIT_J_H},
+    {0x35, 1.0e5, VIF_UNIT_J_H},
+    {0x36, 1.0e6, VIF_UNIT_J_H},
+    {0x37, 1.0e7, VIF_UNIT_J_H},
+    {0x38, 1.0e-6, VIF_UNIT_M3_H},
+    {0x39, 1.0e-5, VIF_UNIT_M3_H},
+    {0x3A, 1.0e-4, VIF_UNIT_M3_H},
+    {0x3B, 1.0e-3, VIF_UNIT_M3_H},
+    {0x3C, 1.0e-2, VIF_UNIT_M3_H},
+    {0x3D, 1.0e-1, VIF_UNIT_M3_H},
+    {0x3E, 1.0e0, VIF_UNIT_M3_H},
+    {0x3F, 1.0e1, VIF_UNIT_M3_H},
+    {0x40, 1.0e-7, VIF_UNIT_M3_MIN},
+    {0x41, 1.0e-6, VIF_UNIT_M3_MIN},
+    {0x42, 1.0e-5, VIF_UNIT_M3_MIN},
+    {0x43, 1.0e-4, VIF_UNIT_M3_MIN},
+    {0x44, 1.0e-3, VIF_UNIT_M3_MIN},
+    {0x45, 1.0e-2, VIF_UNIT_M3_MIN},
+    {0x46, 1.0e-1, VIF_UNIT_M3_MIN},
+    {0x47, 1.0e0, VIF_UNIT_M3_MIN},
+    {0x48, 1.0e-9, VIF_UNIT_M3_S},
+    {0x49, 1.0e-8, VIF_UNIT_M3_S},
+    {0x4A, 1.0e-7, VIF_UNIT_M3_S},
+    {0x4B, 1.0e-6, VIF_UNIT_M3_S},
+    {0x4C, 1.0e-5, VIF_UNIT_M3_S},
+    {0x4D, 1.0e-4, VIF_UNIT_M3_S},
+    {0x4E, 1.0e-3, VIF_UNIT_M3_S},
+    {0x4F, 1.0e-2, VIF_UNIT_M3_S},
+    {0x50, 1.0e-3, VIF_UNIT_KG_H},
+    {0x51, 1.0e-2, VIF_UNIT_KG_H},
+    {0x52, 1.0e-1, VIF_UNIT_KG_H},
+    {0x53, 1.0e0, VIF_UNIT_KG_H},
+    {0x54, 1.0e1, VIF_UNIT_KG_H},
+    {0x55, 1.0e2, VIF_UNIT_KG_H},
+    {0x56, 1.0e3, VIF_UNIT_KG_H},
+    {0x57, 1.0e4, VIF_UNIT_KG_H},
+    {0x58, 1.0e-3, VIF_UNIT_DEGC},
+    {0x59, 1.0e-2, VIF_UNIT_DEGC},
+    {0x5A, 1.0e-1, VIF_UNIT_DEGC},
+    {0x5B, 1.0e0, VIF_UNIT_DEGC},
+    {0x5C, 1.0e-3, VIF_UNIT_DEGC},
+    {0x5D, 1.0e-2, VIF_UNIT_DEGC},
+    {0x5E, 1.0e-1, VIF_UNIT_DEGC},
+    {0x5F, 1.0e0, VIF_UNIT_DEGC},
+    {0x60, 1.0e-3, VIF_UNIT_K},
+    {0x61, 1.0e-2, VIF_UNIT_K},
+    {0x62, 1.0e-1, VIF_UNIT_K},
+    {0x63, 1.0e0, VIF_UNIT_K},
+    {0x64, 1.0e-3, VIF_UNIT_DEGC},
+    {0x65, 1.0e-2, VIF_UNIT_DEGC},
+    {0x66, 1.0e-1, VIF_UNIT_DEGC},
+    {0x67, 1.0e0, VIF_UNIT_DEGC},
+    {0x68, 1.0e-3, VIF_UNIT_BAR},
+    {0x69, 1.0e-2, VIF_UNIT_BAR},
+    {0x6A, 1.0e-1, VIF_UNIT_BAR},
+    {0x6B, 1.0e0, VIF_UNIT_BAR},
+    {0x6C, 1.0, VIF_UNIT_DATETIME},
+    {0x6D, 1.0, VIF_UNIT_DATETIME},
+    {0x6E, 1.0, VIF_UNIT_HCA},
+    {0x70, 1.0, VIF_UNIT_S},
+    {0x71, 60.0, VIF_UNIT_S},
+    {0x72, 3600.0, VIF_UNIT_S},
+    {0x73, 86400.0, VIF_UNIT_S},
+    {0x74, 1.0, VIF_UNIT_S},
+    {0x75, 60.0, VIF_UNIT_S},
+    {0x76, 3600.0, VIF_UNIT_S},
+    {0x77, 86400.0, VIF_UNIT_S},
+    {0x78, 1.0, VIF_UNIT_NONE},
+    {0x79, 1.0, VIF_UNIT_NONE},
+    {0x7A, 1.0, VIF_UNIT_NONE},
     // Standard VIF=0xFD extensions observed in stored wM-Bus frames.
-    {0x7D08, 1.0, ""},
-    {0x7D09, 1.0, ""},
-    {0x7D0B, 1.0, ""},
-    {0x7D0C, 1.0, ""},
-    {0x7D0F, 1.0, ""},
-    {0x7D10, 1.0, ""},
-    {0x7D11, 1.0, ""},
-    {0x7D17, 1.0, "flags"},
-    {0x7D1B, 1.0, ""},
-    {0x7D2C, 1.0, "s"},
-    {0x7D31, 60.0, "s"},
-    {0x7D47, 1.0e-2, "V"},
-    {0x7D61, 1.0, ""},
-    {0x7D66, 1.0, ""},
-    {0x7D6C, 3600.0, "s"},
-    {0x7D30, 1.0, "datetime"},
-    {0x7D70, 1.0, "datetime"},
+    {0x7D08, 1.0, VIF_UNIT_NONE},
+    {0x7D09, 1.0, VIF_UNIT_NONE},
+    {0x7D0B, 1.0, VIF_UNIT_NONE},
+    {0x7D0C, 1.0, VIF_UNIT_NONE},
+    {0x7D0F, 1.0, VIF_UNIT_NONE},
+    {0x7D10, 1.0, VIF_UNIT_NONE},
+    {0x7D11, 1.0, VIF_UNIT_NONE},
+    {0x7D17, 1.0, VIF_UNIT_FLAGS},
+    {0x7D1B, 1.0, VIF_UNIT_NONE},
+    {0x7D2C, 1.0, VIF_UNIT_S},
+    {0x7D31, 60.0, VIF_UNIT_S},
+    {0x7D47, 1.0e-2, VIF_UNIT_V},
+    {0x7D61, 1.0, VIF_UNIT_NONE},
+    {0x7D66, 1.0, VIF_UNIT_NONE},
+    {0x7D6C, 3600.0, VIF_UNIT_S},
+    {0x7D30, 1.0, VIF_UNIT_DATETIME},
+    {0x7D70, 1.0, VIF_UNIT_DATETIME},
 };
 
-bool vif_scale_unit(uint16_t vif_key, double *scale, const char **unit) {
-  for (const auto &item : VIF_SCALE_UNITS) {
-    if (item.key == vif_key) {
-      *scale = item.scale;
-      *unit = item.unit;
-      return !vif_is_datetime(vif_key);
+bool vif_scale_unit(uint16_t vif_key, double *scale, const LogString **unit) {
+  for (const auto &entry : VIF_SCALE_UNITS) {
+    if (progmem_read_uint16(&entry.key) != vif_key) {
+      continue;
     }
+    VifScaleUnit item;
+    progmem_memcpy(&item, &entry, sizeof(item));
+    *scale = item.scale;
+    *unit = VifUnits::get_log_str(item.unit, VIF_UNIT_UNKNOWN);
+    return !vif_is_datetime(vif_key);
   }
   *scale = 1.0;
-  *unit = "unknown";
+  *unit = VifUnits::get_log_str(VIF_UNIT_UNKNOWN, VIF_UNIT_UNKNOWN);
   return false;
 }
 

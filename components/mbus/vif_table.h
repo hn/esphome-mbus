@@ -4,6 +4,10 @@
 #include <cstdint>
 #include <string>
 
+namespace esphome {
+struct LogString;
+}  // namespace esphome
+
 namespace esphome::mbus {
 
 // Returns a human-readable data type name, taking date/time VIFs into account.
@@ -12,10 +16,10 @@ const char *record_data_type_to_string(uint8_t dif, uint16_t vif_key);
 // True for the standard date (0x6C) and date/time (0x6D) VIFs.
 bool vif_is_datetime(uint16_t vif_key);
 
-// Fills scale and unit for the given VIF. Returns true when a scaled numeric
-// value makes sense (e.g. volume). The VIF key is either the base VIF or the
-// extension key produced from 0xFB/0xFD and the first VIFE.
-bool vif_scale_unit(uint16_t vif_key, double *scale, const char **unit);
+// Fills scale and unit (a flash string on ESP8266, log it with LOG_STR_ARG) for the given VIF. Returns true when a
+// scaled numeric value makes sense (e.g. volume). The VIF key is either the base VIF or the extension key produced from
+// 0xFB/0xFD and the first VIFE.
+bool vif_scale_unit(uint16_t vif_key, double *scale, const LogString **unit);
 
 // True if the raw VIF byte is a VIF extension marker (0xFB/0xFD/0xEF/0xFF).
 // For these the first following VIFE belongs to the VIF code itself.

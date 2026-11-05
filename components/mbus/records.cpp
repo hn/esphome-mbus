@@ -85,7 +85,7 @@ static void log_record(const MBusRecord &record) {
     }
     if (record.has_decoded_value) {
       append_to(message, sizeof(message), length, "; decoded: scale=%.12g unit=%s value=%.12g", record.scale,
-                record.unit, record.decoded_value);
+                record.unit != nullptr ? LOG_STR_ARG(record.unit) : LOG_STR_LITERAL("unknown"), record.decoded_value);
     }
   }
   ESP_LOGD(TAG, "%s", message);

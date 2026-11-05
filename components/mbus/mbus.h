@@ -116,7 +116,7 @@ struct MBusRecord {
   bool has_raw_value{false};
   int64_t raw_value{0};
   double scale{1.0};
-  const char *unit{"unknown"};
+  const LogString *unit{nullptr};
   bool has_decoded_value{false};
   double decoded_value{0.0};
   bool has_value{false};
