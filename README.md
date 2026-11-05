@@ -105,6 +105,9 @@ for more background.
 
 ## Configuration Example
 
+`mbus` runs on ESP32 (it uses ESP-IDF's PSA crypto for mode 5 decryption). `encryption_key` is the meter's
+AES key as 32 hex characters.
+
 ```yaml
 external_components:
   - source: github://hn/esphome-mbus@main
@@ -127,6 +130,7 @@ mbus:
     radio_cc1101_id: cc1101_radio
     dump_records: true
     # meter_id: 0x12345678  # optional: only process frames from this meter's serial number
+    # encryption_key: !secret meter_aes_key  # for encrypted (mode 5) meters
 
 sensor:
   - platform: mbus
