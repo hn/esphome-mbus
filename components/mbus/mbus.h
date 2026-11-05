@@ -22,7 +22,6 @@
 #include <cstdio>
 #include <cstdint>
 #include <deque>
-#include <functional>
 #include <initializer_list>
 #include <string>
 #include <vector>
@@ -328,8 +327,8 @@ class MBusComponent : public Component
   void import_psa_key_();
   bool decrypt_mode_5_(const MBusApplicationFrame &frame, size_t payload_offset, size_t encrypted_length,
                        uint8_t access_number, std::vector<uint8_t> *out) const;
-  void parse_records_(const std::vector<uint8_t> &payload,
-                      const std::function<void(const MBusRecord &)> &callback) const;
+  // Calls callback(const MBusRecord &) for every record; defined and only used in records.cpp
+  template<typename F> void parse_records_(const std::vector<uint8_t> &payload, F &&callback) const;
   void process_records_(const std::vector<uint8_t> &payload) const;
   void dump_records_(const std::vector<uint8_t> &payload) const;
   void publish_record_(const MBusRecord &record) const;

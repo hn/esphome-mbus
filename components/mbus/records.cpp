@@ -98,8 +98,7 @@ static void log_special_record(uint8_t dif, size_t pos, const char *data_type, c
            data_type, raw, data_type);
 }
 
-void MBusComponent::parse_records_(const std::vector<uint8_t> &payload,
-                                   const std::function<void(const MBusRecord &)> &callback) const {
+template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_t> &payload, F &&callback) const {
   size_t pos = 0;
   while (pos < payload.size()) {
     while (pos < payload.size() && payload[pos] == 0x2F) {
