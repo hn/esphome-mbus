@@ -85,7 +85,7 @@ sx127x:
   cs_pin: GPIO7
   rst_pin: GPIO3
   dio0_pin: GPIO10
-  dio1_pin: GPIO1          # required for payload_length_lambda / payload_length > 64 (long packet RX)
+  dio1_pin: GPIO1          # required for long packet RX (payload_length > 64 or a lambda)
 
   # --- RF front-end
   modulation: FSK
@@ -105,8 +105,7 @@ sx127x:
   # --- Packet handling
   crc_enable: false
   packet_mode: true
-  payload_length: 0
-  payload_length_lambda: |-
+  payload_length: !lambda |-
     return esphome::mbus::wmbus_frame_codec::expected_packet_length(x);
 
   on_packet:

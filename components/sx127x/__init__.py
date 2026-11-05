@@ -1,11 +1,20 @@
+from typing import Any
+
 from esphome import automation, pins
 import esphome.codegen as cg
 from esphome.components import spi
-from esphome.components.const import CONF_CRC_ENABLE, CONF_ON_PACKET
+from esphome.components.const import (
+    CONF_BITRATE,
+    CONF_CRC_ENABLE,
+    CONF_MODULATION,
+    CONF_ON_PACKET,
+    CONF_RST_PIN,
+)
 import esphome.config_validation as cv
-from esphome.const import CONF_DATA, CONF_FREQUENCY, CONF_ID
-from esphome.core import ID
+from esphome.const import CONF_DATA, CONF_FREQUENCY
+from esphome.types import ConfigType
 
+DOMAIN = "sx127x"
 MULTI_CONF = True
 CODEOWNERS = ["@swoboda1337"]
 DEPENDENCIES = ["spi"]
@@ -15,24 +24,20 @@ CONF_SX127X_ID = "sx127x_id"
 CONF_AFC_BANDWIDTH = "afc_bandwidth"
 CONF_AUTO_CAL = "auto_cal"
 CONF_BANDWIDTH = "bandwidth"
-CONF_BITRATE = "bitrate"
 CONF_BITSYNC = "bitsync"
 CONF_CODING_RATE = "coding_rate"
 CONF_DEVIATION = "deviation"
 CONF_DIO0_PIN = "dio0_pin"
 CONF_DIO1_PIN = "dio1_pin"
-CONF_MODULATION = "modulation"
 CONF_PA_PIN = "pa_pin"
 CONF_PA_POWER = "pa_power"
 CONF_PA_RAMP = "pa_ramp"
 CONF_PACKET_MODE = "packet_mode"
 CONF_PAYLOAD_LENGTH = "payload_length"
-CONF_PAYLOAD_LENGTH_LAMBDA = "payload_length_lambda"
 CONF_PREAMBLE_DETECT = "preamble_detect"
 CONF_PREAMBLE_ERRORS = "preamble_errors"
 CONF_PREAMBLE_POLARITY = "preamble_polarity"
 CONF_PREAMBLE_SIZE = "preamble_size"
-CONF_RST_PIN = "rst_pin"
 CONF_RX_FLOOR = "rx_floor"
 CONF_RX_START = "rx_start"
 CONF_SHAPING = "shaping"
@@ -80,16 +85,9 @@ CODING_RATE = {
     "CR_4_8": SX127xModemCfg1.CODING_RATE_4_8,
 }
 
-MOD = {
-    "LORA": SX127xOpMode.MOD_LORA,
-    "FSK": SX127xOpMode.MOD_FSK,
-    "OOK": SX127xOpMode.MOD_OOK,
-}
+MOD = SX127xOpMode.options("LORA", "FSK", "OOK", prefix="MOD_")
 
-PA_PIN = {
-    "RFO": SX127xPaConfig.PA_PIN_RFO,
-    "BOOST": SX127xPaConfig.PA_PIN_BOOST,
-}
+PA_PIN = SX127xPaConfig.options("RFO", "BOOST", prefix="PA_PIN_")
 
 RAMP = {
     "10us": SX127xPaRamp.PA_RAMP_10,
@@ -119,27 +117,8 @@ SHAPING = {
     "NONE": SX127xPaRamp.SHAPING_NONE,
 }
 
-RunImageCalAction = sx127x_ns.class_(
-    "RunImageCalAction", automation.Action, cg.Parented.template(SX127x)
-)
-SendPacketAction = sx127x_ns.class_(
-    "SendPacketAction", automation.Action, cg.Parented.template(SX127x)
-)
-SetModeTxAction = sx127x_ns.class_(
-    "SetModeTxAction", automation.Action, cg.Parented.template(SX127x)
-)
-SetModeRxAction = sx127x_ns.class_(
-    "SetModeRxAction", automation.Action, cg.Parented.template(SX127x)
-)
-SetModeSleepAction = sx127x_ns.class_(
-    "SetModeSleepAction", automation.Action, cg.Parented.template(SX127x)
-)
-SetModeStandbyAction = sx127x_ns.class_(
-    "SetModeStandbyAction", automation.Action, cg.Parented.template(SX127x)
-)
 
-
-def validate_raw_data(value):
+def validate_raw_data(value: Any) -> bytes | list[int]:
     if isinstance(value, str):
         return value.encode("utf-8")
     if isinstance(value, list):
@@ -149,7 +128,21 @@ def validate_raw_data(value):
     )
 
 
-def validate_config(config):
+MAX_PACKET_SIZE = 255
+# The radio's payload length register is 8 bits, and empty packets are rejected.
+validate_packet_data = cv.All(validate_raw_data, cv.Length(min=1, max=MAX_PACKET_SIZE))
+
+
+def is_long_packet(config: ConfigType) -> bool:
+    """Whether config uses long packet RX (FSK/OOK packet mode, payload_length > 64 or a lambda)."""
+    if config[CONF_MODULATION] == "LORA" or not config.get(CONF_PACKET_MODE):
+        return False
+    payload_length = config[CONF_PAYLOAD_LENGTH]
+    return cg.is_template(payload_length) or payload_length > 64
+
+
+def validate_config(config: ConfigType) -> ConfigType:
+    payload_length_is_lambda = cg.is_template(config[CONF_PAYLOAD_LENGTH])
     if config[CONF_MODULATION] == "LORA":
         bws = [
             "7_8kHz",
@@ -169,12 +162,12 @@ def validate_config(config):
             raise cv.Invalid("Cannot use LoRa without dio0_pin")
         if config[CONF_PREAMBLE_SIZE] < 6:
             raise cv.Invalid("Minimum 'preamble_size' is 6 with LORA")
+        if payload_length_is_lambda:
+            raise cv.Invalid("payload_length as a lambda is not available with LORA")
         if config[CONF_SPREADING_FACTOR] == 6 and config[CONF_PAYLOAD_LENGTH] == 0:
             raise cv.Invalid("Payload length must be set when spreading factor is 6")
         if config[CONF_PAYLOAD_LENGTH] > 255:
             raise cv.Invalid("Payload length must be <= 255 with LORA")
-        if CONF_PAYLOAD_LENGTH_LAMBDA in config:
-            raise cv.Invalid("payload_length_lambda is not available with LORA")
         if CONF_DIO1_PIN in config:
             raise cv.Invalid("dio1_pin is not available with LORA")
         if CONF_AFC_BANDWIDTH in config:
@@ -192,31 +185,28 @@ def validate_config(config):
             raise cv.Invalid("Config 'packet_mode' required with FSK/OOK")
         if config[CONF_PACKET_MODE] and CONF_DIO0_PIN not in config:
             raise cv.Invalid("Config 'dio0_pin' required in packet mode")
-        if config[CONF_PAYLOAD_LENGTH] > 64 and not config[CONF_PACKET_MODE]:
+        if (
+            not payload_length_is_lambda
+            and config[CONF_PAYLOAD_LENGTH] > 64
+            and not config[CONF_PACKET_MODE]
+        ):
             raise cv.Invalid(
                 "payload_length must be <= 64 when packet_mode is disabled"
             )
-        if CONF_PAYLOAD_LENGTH_LAMBDA in config:
-            if not config[CONF_PACKET_MODE]:
-                raise cv.Invalid(
-                    "packet_mode is required when payload_length_lambda is set"
-                )
-            if config[CONF_PAYLOAD_LENGTH] != 0:
-                raise cv.Invalid(
-                    "payload_length must be 0 when payload_length_lambda is set"
-                )
-        is_long_packet = (
-            config[CONF_PAYLOAD_LENGTH] > 64 or CONF_PAYLOAD_LENGTH_LAMBDA in config
-        )
-        if is_long_packet and CONF_DIO1_PIN not in config:
+        if payload_length_is_lambda and not config[CONF_PACKET_MODE]:
+            raise cv.Invalid("packet_mode is required when payload_length is a lambda")
+        long_packet = is_long_packet(config)
+        if long_packet and CONF_DIO1_PIN not in config:
             raise cv.Invalid(
-                "dio1_pin is required when payload_length > 64 or "
-                "payload_length_lambda is set"
+                "dio1_pin is required when payload_length > 64 or is a lambda"
             )
-        if is_long_packet and config[CONF_CRC_ENABLE]:
+        if long_packet and config[CONF_CRC_ENABLE]:
             raise cv.Invalid(
-                "crc_enable is not available with payload_length > 64 or "
-                "payload_length_lambda"
+                "crc_enable is not available with payload_length > 64 or a lambda"
+            )
+        if not long_packet and CONF_DIO1_PIN in config:
+            raise cv.Invalid(
+                "dio1_pin is only used with payload_length > 64 or a lambda"
             )
     if config[CONF_PA_PIN] == "RFO" and config[CONF_PA_POWER] > 15:
         raise cv.Invalid("PA power must be <= 15 dbm when using the RFO pin")
@@ -250,14 +240,15 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_PA_POWER, default=17): cv.int_range(min=0, max=17),
             cv.Optional(CONF_PA_RAMP, default="40us"): cv.enum(RAMP),
             cv.Optional(CONF_PACKET_MODE): cv.boolean,
-            cv.Optional(CONF_PAYLOAD_LENGTH, default=0): cv.int_range(min=0, max=1024),
-            cv.Optional(CONF_PAYLOAD_LENGTH_LAMBDA): cv.lambda_,
+            cv.Optional(CONF_PAYLOAD_LENGTH, default=0): cv.templatable(
+                cv.int_range(min=0, max=1024)
+            ),
             cv.Optional(CONF_PREAMBLE_DETECT, default=0): cv.int_range(min=0, max=3),
             cv.Optional(CONF_PREAMBLE_ERRORS, default=0): cv.int_range(min=0, max=31),
             cv.Optional(CONF_PREAMBLE_POLARITY, default=0xAA): cv.All(
                 cv.hex_int, cv.one_of(0xAA, 0x55)
             ),
-            cv.Optional(CONF_PREAMBLE_SIZE, default=0): cv.int_range(min=0, max=65535),
+            cv.Optional(CONF_PREAMBLE_SIZE, default=0): cv.uint16_t,
             cv.Required(CONF_RST_PIN): pins.internal_gpio_output_pin_schema,
             cv.Optional(CONF_RX_FLOOR, default=-94): cv.float_range(min=-128, max=-1),
             cv.Optional(CONF_RX_START, default=True): cv.boolean,
@@ -272,10 +263,8 @@ CONFIG_SCHEMA = (
 )
 
 
-async def to_code(config):
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
-    await spi.register_spi_device(var, config)
+async def to_code(config: ConfigType) -> None:
+    var = await spi.new_spi_component(config)
     if CONF_ON_PACKET in config:
         await automation.build_automation(
             var.get_packet_trigger(),
@@ -286,14 +275,9 @@ async def to_code(config):
             ],
             config[CONF_ON_PACKET],
         )
-    if CONF_DIO0_PIN in config:
-        dio0_pin = await cg.gpio_pin_expression(config[CONF_DIO0_PIN])
-        cg.add(var.set_dio0_pin(dio0_pin))
-    if CONF_DIO1_PIN in config:
-        dio1_pin = await cg.gpio_pin_expression(config[CONF_DIO1_PIN])
-        cg.add(var.set_dio1_pin(dio1_pin))
-    rst_pin = await cg.gpio_pin_expression(config[CONF_RST_PIN])
-    cg.add(var.set_rst_pin(rst_pin))
+    await cg.add_pin(var.set_dio0_pin, config.get(CONF_DIO0_PIN))
+    await cg.add_pin(var.set_dio1_pin, config.get(CONF_DIO1_PIN))
+    await cg.add_pin(var.set_rst_pin, config[CONF_RST_PIN])
     cg.add(var.set_auto_cal(config[CONF_AUTO_CAL]))
     cg.add(var.set_bandwidth(config[CONF_BANDWIDTH]))
     if CONF_AFC_BANDWIDTH in config:
@@ -310,14 +294,15 @@ async def to_code(config):
     cg.add(var.set_pa_power(config[CONF_PA_POWER]))
     cg.add(var.set_shaping(config[CONF_SHAPING]))
     cg.add(var.set_crc_enable(config[CONF_CRC_ENABLE]))
-    cg.add(var.set_payload_length(config[CONF_PAYLOAD_LENGTH]))
-    if CONF_PAYLOAD_LENGTH_LAMBDA in config:
+    if cg.is_template(config[CONF_PAYLOAD_LENGTH]):
         lambda_ = await cg.process_lambda(
-            config[CONF_PAYLOAD_LENGTH_LAMBDA],
+            config[CONF_PAYLOAD_LENGTH],
             [(cg.std_vector.template(cg.uint8).operator("ref").operator("const"), "x")],
             return_type=cg.int32,
         )
         cg.add(var.set_payload_length_lambda(lambda_))
+    else:
+        cg.add(var.set_payload_length(config[CONF_PAYLOAD_LENGTH]))
     cg.add(var.set_preamble_detect(config[CONF_PREAMBLE_DETECT]))
     cg.add(var.set_preamble_size(config[CONF_PREAMBLE_SIZE]))
     cg.add(var.set_preamble_polarity(config[CONF_PREAMBLE_POLARITY]))
@@ -336,69 +321,29 @@ NO_ARGS_ACTION_SCHEMA = automation.maybe_simple_id(
 )
 
 
-@automation.register_action(
-    "sx127x.run_image_cal",
-    RunImageCalAction,
-    NO_ARGS_ACTION_SCHEMA,
-    synchronous=True,
-)
-@automation.register_action(
-    "sx127x.set_mode_tx",
-    SetModeTxAction,
-    NO_ARGS_ACTION_SCHEMA,
-    synchronous=True,
-)
-@automation.register_action(
-    "sx127x.set_mode_rx",
-    SetModeRxAction,
-    NO_ARGS_ACTION_SCHEMA,
-    synchronous=True,
-)
-@automation.register_action(
-    "sx127x.set_mode_sleep",
-    SetModeSleepAction,
-    NO_ARGS_ACTION_SCHEMA,
-    synchronous=True,
-)
-@automation.register_action(
-    "sx127x.set_mode_standby",
-    SetModeStandbyAction,
-    NO_ARGS_ACTION_SCHEMA,
-    synchronous=True,
-)
-async def no_args_action_to_code(config, action_id, template_arg, args):
-    var = cg.new_Pvariable(action_id, template_arg)
-    await cg.register_parented(var, config[CONF_ID])
-    return var
+for _name, _call in (
+    ("sx127x.run_image_cal", "run_image_cal()"),
+    ("sx127x.set_mode_tx", "set_mode_tx()"),
+    ("sx127x.set_mode_rx", "set_mode_rx()"),
+    ("sx127x.set_mode_sleep", "set_mode_sleep()"),
+    ("sx127x.set_mode_standby", "set_mode_standby()"),
+):
+    automation.register_apply_action(
+        _name, NO_ARGS_ACTION_SCHEMA, automation.ApplyCall(_call)
+    )
 
 
 SEND_PACKET_ACTION_SCHEMA = cv.maybe_simple_value(
     {
         cv.GenerateID(): cv.use_id(SX127x),
-        cv.Required(CONF_DATA): cv.templatable(validate_raw_data),
+        cv.Required(CONF_DATA): cv.templatable(validate_packet_data),
     },
     key=CONF_DATA,
 )
 
 
-@automation.register_action(
+automation.register_apply_action(
     "sx127x.send_packet",
-    SendPacketAction,
     SEND_PACKET_ACTION_SCHEMA,
-    synchronous=True,
+    automation.ApplyBytes(CONF_DATA, "transmit_packet({})", stack=MAX_PACKET_SIZE),
 )
-async def send_packet_action_to_code(config, action_id, template_arg, args):
-    var = cg.new_Pvariable(action_id, template_arg)
-    await cg.register_parented(var, config[CONF_ID])
-    data = config[CONF_DATA]
-    if isinstance(data, bytes):
-        data = list(data)
-    if cg.is_template(data):
-        templ = await cg.templatable(data, args, cg.std_vector.template(cg.uint8))
-        cg.add(var.set_data_template(templ))
-    else:
-        # Generate static array in flash to avoid RAM copy
-        arr_id = ID(f"{action_id}_data", is_declaration=True, type=cg.uint8)
-        arr = cg.static_const_array(arr_id, cg.ArrayInitializer(*data))
-        cg.add(var.set_data_static(arr, len(data)))
-    return var

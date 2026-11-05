@@ -1,13 +1,24 @@
 #include "cc1101.h"
 #include "cc1101pa.h"
+#include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
+#include "esphome/core/progmem.h"
 #include <cmath>
-#include <utility>
+#include <cstring>
+
+#ifdef USE_ESP32
+#include <esp_memory_utils.h>
+#endif
 
 namespace esphome::cc1101 {
 
-static const char *const TAG = "cc1101";
+ESPHOME_LOG_TAG(TAG, "cc1101");
+static constexpr size_t TX_FIFO_SIZE = 64;
+static constexpr size_t RX_FIFO_SIZE = 64;
+
+// MDMCFG2 MOD_FORMAT values
+PROGMEM_STRING_TABLE(ModulationStrings, "2-FSK", "GFSK", "UNUSED", "ASK/OOK", "4-FSK", "UNUSED", "UNUSED", "MSK");
 
 static void split_float(float value, int mbits, uint8_t &e, uint32_t &m) {
   int e_tmp;
@@ -103,8 +114,6 @@ CC1101Component::CC1101Component() {
   memset(this->pa_table_, 0, sizeof(this->pa_table_));
 }
 
-void IRAM_ATTR CC1101Component::gpio_intr(CC1101Component *arg) { arg->enable_loop_soon_any_context(); }
-
 void CC1101Component::setup() {
   this->spi_setup();
 
@@ -162,6 +171,7 @@ void CC1101Component::configure() {
     this->write_(static_cast<Register>(i));
   }
   this->set_output_power(this->output_power_requested_);
+  this->packet_idle_timeout_ms_ = this->compute_packet_idle_timeout_ms_();
 
   if (!this->enter_rx_()) {
     this->mark_failed();
@@ -180,7 +190,7 @@ bool CC1101Component::is_long_packet_mode_() const {
   return this->packet_mode_ && (this->packet_length_ > 64 || this->packet_length_func_);
 }
 
-uint32_t CC1101Component::packet_idle_timeout_ms_() const {
+uint32_t CC1101Component::compute_packet_idle_timeout_ms_() const {
   const float symbol_rate =
       (((256.0f + this->state_.DRATE_M) * (1 << this->state_.DRATE_E)) / (1 << 28)) * XTAL_FREQUENCY;
   const uint32_t timeout = static_cast<uint32_t>(std::ceil((8.0f * PACKET_IDLE_TIMEOUT_BYTES * 1000.0f) / symbol_rate));
@@ -199,7 +209,7 @@ void CC1101Component::reset_long_packet_rx_() {
   } else if (this->packet_length_ > 255) {
     this->packet_expected_length_ = this->packet_length_;
     this->state_.LENGTH_CONFIG = static_cast<uint8_t>(LengthConfig::LENGTH_CONFIG_INFINITE);
-    this->state_.PKTLEN = static_cast<uint8_t>(this->packet_length_ % 256);
+    this->set_long_packet_pktlen_(this->packet_length_);
   } else {
     this->packet_expected_length_ = this->packet_length_;
     this->packet_fixed_mode_armed_ = true;
@@ -215,10 +225,19 @@ void CC1101Component::reset_long_packet_rx_() {
 
 void CC1101Component::restart_long_packet_rx_() {
   this->enter_idle_();
-  this->strobe_(Command::FRX);
-  this->reset_long_packet_rx_();
   this->enter_rx_();
   this->disable_loop();
+}
+
+void CC1101Component::set_long_packet_pktlen_(uint16_t length) {
+  // PKTLEN must not be 0 (datasheet section 15.2), so a multiple of 256 stays in infinite mode for the
+  // whole packet and ends on the MCU byte count alone
+  if (length % 256 == 0) {
+    this->state_.PKTLEN = 0xFF;
+    this->packet_fixed_mode_armed_ = true;
+  } else {
+    this->state_.PKTLEN = static_cast<uint8_t>(length % 256);
+  }
 }
 
 void CC1101Component::maybe_switch_long_packet_to_fixed_() {
@@ -245,24 +264,16 @@ void CC1101Component::maybe_switch_long_packet_to_fixed_() {
 void CC1101Component::finish_long_packet_() {
   this->packet_.resize(this->packet_expected_length_);
   this->read_(Register::FREQEST);
-  this->read_(Register::RSSI);
   this->read_(Register::LQI);
   float freq_offset = static_cast<int8_t>(this->state_.FREQEST) * (XTAL_FREQUENCY / (1 << 14));
-  float rssi = (this->state_.RSSI * RSSI_STEP) - RSSI_OFFSET;
-  bool crc_ok = (this->state_.LQI & STATUS_CRC_OK_MASK) != 0;
   uint8_t lqi = this->state_.LQI & STATUS_LQI_MASK;
-  if (this->state_.CRC_EN == 0 || crc_ok) {
-    this->call_listeners_(this->packet_, freq_offset, rssi, lqi);
-  }
+  // No CRC check: crc_enable is rejected for long packets, the chip only sets CRC_OK after the last payload
+  // byte, and the packet is finished on the MCU byte count before that
+  this->call_listeners_(this->packet_, freq_offset, this->long_packet_rssi_, lqi);
   this->restart_long_packet_rx_();
 }
 
 void CC1101Component::handle_long_packet_(uint8_t rx_bytes) {
-  if (this->packet_expected_length_ > 0 && this->packet_.size() >= this->packet_expected_length_) {
-    this->finish_long_packet_();
-    return;
-  }
-
   uint16_t to_read = rx_bytes;
   if (this->packet_expected_length_ > 0) {
     const uint16_t remaining = this->packet_expected_length_ - this->packet_.size();
@@ -277,7 +288,8 @@ void CC1101Component::handle_long_packet_(uint8_t rx_bytes) {
   }
 
   if (to_read == 0) {
-    if (!this->packet_.empty() && millis() - this->packet_last_byte_ms_ > this->packet_idle_timeout_ms_()) {
+    if (!this->packet_.empty() &&
+        App.get_loop_component_start_time() - this->packet_last_byte_ms_ > this->packet_idle_timeout_ms_) {
       ESP_LOGW(TAG, "Packet receive timeout, discarding packet: received=%u expected=%u fifo=%u",
                static_cast<uint16_t>(this->packet_.size()), this->packet_expected_length_, rx_bytes);
       this->restart_long_packet_rx_();
@@ -286,15 +298,14 @@ void CC1101Component::handle_long_packet_(uint8_t rx_bytes) {
   }
 
   const size_t old_size = this->packet_.size();
-  // Reserve the known target length once, so growth below stays within already-reserved capacity
-  // instead of reallocating repeatedly. A no-op once capacity() already covers it (e.g. every call
-  // after the first for a fixed packet_length, or every call after packet_length_lambda resolves it).
-  if (this->packet_expected_length_ > 0 && this->packet_.capacity() < this->packet_expected_length_) {
-    this->packet_.reserve(this->packet_expected_length_);
+  if (old_size == 0) {
+    // The RSSI register follows the live signal; sample it while the packet is still on air
+    this->read_(Register::RSSI);
+    this->long_packet_rssi_ = (this->state_.RSSI * RSSI_STEP) - RSSI_OFFSET;
   }
   this->packet_.resize(old_size + to_read);
   this->read_(Register::FIFO, this->packet_.data() + old_size, to_read);
-  this->packet_last_byte_ms_ = millis();
+  this->packet_last_byte_ms_ = App.get_loop_component_start_time();
   ESP_LOGVV(TAG, "Drained RX FIFO: read=%u received=%u expected=%u fifo=%u", to_read,
             static_cast<uint16_t>(this->packet_.size()), this->packet_expected_length_, rx_bytes);
 
@@ -318,15 +329,15 @@ void CC1101Component::handle_long_packet_(uint8_t rx_bytes) {
       this->restart_long_packet_rx_();
       return;
     }
-    if (length > 0 && static_cast<size_t>(length) < this->packet_.size()) {
-      ESP_LOGW(TAG, "Invalid computed packet length, discarding packet: length=%" PRId32 " received=%u", length,
-               static_cast<uint16_t>(this->packet_.size()));
-      this->restart_long_packet_rx_();
+    // A packet shorter than the first FIFO drain is already complete; finish_long_packet_() truncates it
+    if (length > 0 && static_cast<size_t>(length) <= this->packet_.size()) {
+      this->packet_expected_length_ = static_cast<uint16_t>(length);
+      this->finish_long_packet_();
       return;
     }
     if (length > 0) {
       this->packet_expected_length_ = static_cast<uint16_t>(length);
-      this->state_.PKTLEN = static_cast<uint8_t>(length <= 255 ? length : length % 256);
+      this->set_long_packet_pktlen_(this->packet_expected_length_);
       this->write_(Register::PKTLEN);
       ESP_LOGVV(TAG, "Resolved packet length: received=%u expected=%u pktlen=%u",
                 static_cast<uint16_t>(this->packet_.size()), this->packet_expected_length_, this->state_.PKTLEN);
@@ -343,6 +354,7 @@ void CC1101Component::handle_long_packet_(uint8_t rx_bytes) {
 void CC1101Component::loop() {
   if (this->state_.PKT_FORMAT != static_cast<uint8_t>(PacketFormat::PACKET_FORMAT_FIFO) || this->gdo0_pin_ == nullptr ||
       (!this->is_long_packet_mode_() && !this->gdo0_pin_->digital_read())) {
+    this->disable_loop();
     return;
   }
 
@@ -352,6 +364,16 @@ void CC1101Component::loop() {
 
   // Read state
   this->read_(Register::RXBYTES);
+  if (this->is_long_packet_mode_()) {
+    // While bytes arrive, RXBYTES can be misread; read it until two reads agree (datasheet section 20)
+    for (uint8_t retries = RXBYTES_STABLE_RETRIES; retries > 0; retries--) {
+      const uint8_t previous = this->state_.NUM_RXBYTES;
+      this->read_(Register::RXBYTES);
+      if (this->state_.NUM_RXBYTES == previous) {
+        break;
+      }
+    }
+  }
   uint8_t rx_bytes = this->state_.NUM_RXBYTES;
   bool overflow = this->state_.RXFIFO_OVERFLOW;
   if (this->is_long_packet_mode_()) {
@@ -366,7 +388,8 @@ void CC1101Component::loop() {
         this->disable_loop();
         return;
       }
-      if (!this->packet_.empty() && millis() - this->packet_last_byte_ms_ > this->packet_idle_timeout_ms_()) {
+      if (!this->packet_.empty() &&
+          App.get_loop_component_start_time() - this->packet_last_byte_ms_ > this->packet_idle_timeout_ms_) {
         ESP_LOGW(TAG, "Packet receive timeout, discarding packet: received=%u expected=%u fifo=%u",
                  static_cast<uint16_t>(this->packet_.size()), this->packet_expected_length_, rx_bytes);
         this->restart_long_packet_rx_();
@@ -423,8 +446,6 @@ void CC1101Component::loop() {
 }
 
 void CC1101Component::dump_config() {
-  static const char *const MODULATION_NAMES[] = {"2-FSK", "GFSK",   "UNUSED", "ASK/OOK",
-                                                 "4-FSK", "UNUSED", "UNUSED", "MSK"};
   int32_t freq = static_cast<int32_t>(this->state_.FREQ2 << 16 | this->state_.FREQ1 << 8 | this->state_.FREQ0) *
                  XTAL_FREQUENCY / (1 << 16);
   float symbol_rate = (((256.0f + this->state_.DRATE_M) * (1 << this->state_.DRATE_E)) / (1 << 28)) * XTAL_FREQUENCY;
@@ -438,8 +459,9 @@ void CC1101Component::dump_config() {
                 "  Symbol Rate: %.0f baud\n"
                 "  Filter Bandwidth: %.1f Hz\n"
                 "  Output Power: %.1f dBm",
-                this->chip_id_, freq, this->state_.CHANNR, MODULATION_NAMES[this->state_.MOD_FORMAT & 0x07],
-                symbol_rate, bw, this->output_power_effective_);
+                this->chip_id_, freq, this->state_.CHANNR,
+                LOG_STR_ARG(ModulationStrings::get_log_str(this->state_.MOD_FORMAT & 0x07, 0)), symbol_rate, bw,
+                this->output_power_effective_);
   LOG_PIN("  CS Pin: ", this->cs_);
   LOG_PIN("  GDO0 Pin: ", this->gdo0_pin_);
 
@@ -460,11 +482,17 @@ void CC1101Component::dump_config() {
 }
 
 void CC1101Component::begin_tx() {
+  // Read the mode before the PKTCTRL0 write below overwrites it in state_
+  const bool packet_mode = this->state_.PKT_FORMAT == static_cast<uint8_t>(PacketFormat::PACKET_FORMAT_FIFO);
   // Ensure Packet Format is 3 (Async Serial)
   this->write_(Register::PKTCTRL0, 0x32);
   ESP_LOGV(TAG, "Beginning TX sequence");
   if (this->gdo0_pin_ != nullptr) {
-    this->gdo0_pin_->detach_interrupt();
+    // setup() only attaches the interrupt in packet mode. In async serial mode the pin may be
+    // shared with remote_receiver, and detaching here would remove the receiver's interrupt.
+    if (packet_mode) {
+      this->gdo0_pin_->detach_interrupt();
+    }
     this->gdo0_pin_->pin_mode(gpio::FLAG_OUTPUT);
   }
   // Transition through IDLE to bypass CCA (Clear Channel Assessment) which can
@@ -495,6 +523,11 @@ void CC1101Component::reset() {
 void CC1101Component::set_idle() {
   ESP_LOGV(TAG, "Setting IDLE state");
   this->enter_idle_();
+  if (this->is_long_packet_mode_()) {
+    this->strobe_(Command::FRX);
+    this->reset_long_packet_rx_();
+    this->disable_loop();
+  }
 }
 
 bool CC1101Component::wait_for_state_(State target_state, uint32_t timeout_ms) {
@@ -533,7 +566,14 @@ void CC1101Component::enter_idle_() {
   this->wait_for_state_(State::IDLE);
 }
 
-bool CC1101Component::enter_rx_() { return this->enter_calibrated_(State::RX, Command::RX); }
+bool CC1101Component::enter_rx_() {
+  if (this->is_long_packet_mode_()) {
+    // Every RX entry starts a fresh long packet; callers leave the chip in IDLE, where SFRX is allowed
+    this->strobe_(Command::FRX);
+    this->reset_long_packet_rx_();
+  }
+  return this->enter_calibrated_(State::RX, Command::RX);
+}
 
 bool CC1101Component::enter_tx_() { return this->enter_calibrated_(State::TX, Command::TX); }
 
@@ -586,36 +626,40 @@ void CC1101Component::read_(Register reg, uint8_t *buffer, size_t length) {
   this->disable();
 }
 
-CC1101Error CC1101Component::transmit_packet(const std::vector<uint8_t> &packet) {
+CC1101Error CC1101Component::transmit_packet(const uint8_t *data, size_t len) {
   if (this->state_.PKT_FORMAT != static_cast<uint8_t>(PacketFormat::PACKET_FORMAT_FIFO)) {
     ESP_LOGW(TAG, "Cannot transmit packet: packet mode is not FIFO");
     return CC1101Error::PARAMS;
   }
-  // Long packet TX needs chunked FIFO refills and is not implemented.
-  if (this->state_.LENGTH_CONFIG == static_cast<uint8_t>(LengthConfig::LENGTH_CONFIG_INFINITE)) {
-    ESP_LOGW(TAG, "Cannot transmit packet: long packet TX is not implemented for infinite packet mode");
+  // Long packet TX needs chunked FIFO refills and is not implemented
+  if (this->is_long_packet_mode_()) {
+    ESP_LOGW(TAG, "Cannot transmit packet: long packet mode is RX-only");
     return CC1101Error::PARAMS;
   }
-  if (this->state_.LENGTH_CONFIG == static_cast<uint8_t>(LengthConfig::LENGTH_CONFIG_VARIABLE) && packet.size() > 63) {
+  const bool variable = this->state_.LENGTH_CONFIG == static_cast<uint8_t>(LengthConfig::LENGTH_CONFIG_VARIABLE);
+  // In variable length mode the FIFO also holds the length byte
+  if (len + (variable ? 1 : 0) > TX_FIFO_SIZE) {
     ESP_LOGW(TAG,
-             "Cannot transmit packet: long packet TX is not implemented, payload length %u exceeds variable-length TX "
-             "payload limit 63",
-             static_cast<unsigned>(packet.size()));
-    return CC1101Error::PARAMS;
-  }
-  if (packet.size() > 64) {
-    ESP_LOGW(TAG, "Cannot transmit packet: long packet TX is not implemented, payload length %u exceeds TX FIFO limit 64",
-             static_cast<unsigned>(packet.size()));
+             "Cannot transmit packet: long packet TX is not implemented, payload length %u exceeds TX FIFO limit %u",
+             static_cast<unsigned>(len), static_cast<unsigned>(TX_FIFO_SIZE));
     return CC1101Error::PARAMS;
   }
 
   // Write packet
   this->enter_idle_();
   this->strobe_(Command::FTX);
-  if (this->state_.LENGTH_CONFIG == static_cast<uint8_t>(LengthConfig::LENGTH_CONFIG_VARIABLE)) {
-    this->write_(Register::FIFO, static_cast<uint8_t>(packet.size()));
+  if (variable) {
+    this->write_(Register::FIFO, static_cast<uint8_t>(len));
   }
-  this->write_(Register::FIFO, packet.data(), packet.size());
+#ifdef USE_ESP32
+  // SPI DMA cannot read flash or unaligned buffers; stage them here so the driver does not allocate a copy
+  alignas(4) uint8_t staged[TX_FIFO_SIZE];
+  if (len != 0 && (!esp_ptr_dma_capable(data) || (reinterpret_cast<uintptr_t>(data) & 3) != 0)) {
+    std::memcpy(staged, data, len);
+    data = staged;
+  }
+#endif
+  this->write_(Register::FIFO, data, len);
 
   // Calibrate PLL
   if (!this->enter_calibrated_(State::FSTXON, Command::FSTXON)) {
@@ -760,6 +804,7 @@ void CC1101Component::set_symbol_rate(float value) {
   split_float(value * (1 << 28) / XTAL_FREQUENCY, 8, e, m);
   this->state_.DRATE_E = e;
   this->state_.DRATE_M = static_cast<uint8_t>(m);
+  this->packet_idle_timeout_ms_ = this->compute_packet_idle_timeout_ms_();
   if (this->initialized_) {
     this->write_(Register::MDMCFG4);
     this->write_(Register::MDMCFG3);
@@ -971,6 +1016,9 @@ void CC1101Component::configure_packet_mode_() {
       // Threshold-only signal reasserts after each partial FIFO drain during long packets.
       this->state_.GDO0_CFG = 0x00;
       this->state_.FIFO_THR = 7;
+      // Reserve once, so receiving never allocates. Before a lambda resolves the length, up to one FIFO
+      // drain past MAX_PACKET_LENGTH can be read before the size check discards the packet.
+      this->packet_.reserve(this->packet_length_func_ ? MAX_PACKET_LENGTH + RX_FIFO_SIZE : this->packet_length_);
       this->reset_long_packet_rx_();
     } else {
       this->state_.GDO0_CFG = 0x01;
@@ -1013,7 +1061,7 @@ void CC1101Component::set_packet_length(uint16_t value) {
 }
 
 void CC1101Component::set_packet_length_lambda(packet_length_func_t func) {
-  this->packet_length_func_ = std::move(func);
+  this->packet_length_func_ = func;
   this->configure_packet_mode_();
 }
 

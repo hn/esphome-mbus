@@ -5,13 +5,12 @@
 #include "esphome/components/spi/spi.h"
 #include "esphome/core/automation.h"
 #include "cc1101defs.h"
-#include <functional>
 #include <vector>
 
 namespace esphome::cc1101 {
 
 enum class CC1101Error { NONE = 0, TIMEOUT, PARAMS, CRC_ERROR, FIFO_OVERFLOW, PLL_LOCK };
-using packet_length_func_t = std::function<int32_t(const std::vector<uint8_t> &)>;
+using packet_length_func_t = int32_t (*)(const std::vector<uint8_t> &);
 
 class CC1101Listener {
  public:
@@ -92,7 +91,10 @@ class CC1101Component final : public Component,
   void set_whitening(bool value);
 
   // Packet mode operations
-  CC1101Error transmit_packet(const std::vector<uint8_t> &packet);
+  CC1101Error transmit_packet(const std::vector<uint8_t> &packet) {
+    return this->transmit_packet(packet.data(), packet.size());
+  }
+  CC1101Error transmit_packet(const uint8_t *data, size_t len);
   void register_listener(CC1101Listener *listener) { this->listeners_.push_back(listener); }
   Trigger<std::vector<uint8_t>, float, float, uint8_t> *get_packet_trigger() { return &this->packet_trigger_; }
 
@@ -108,7 +110,9 @@ class CC1101Component final : public Component,
 
   // GDO pin for packet reception
   InternalGPIOPin *gdo0_pin_{nullptr};
-  static void IRAM_ATTR gpio_intr(CC1101Component *arg);
+  // Inline like App.get_loop_component_start_time(): on RP2040 an out-of-line IRAM_ATTR function in the same
+  // file as that inline one fails with a section type conflict
+  static void IRAM_ATTR gpio_intr(CC1101Component *arg) { arg->enable_loop_soon_any_context(); }
 
   // Packet handling
   void call_listeners_(const std::vector<uint8_t> &packet, float freq_offset, float rssi, uint8_t lqi);
@@ -119,14 +123,17 @@ class CC1101Component final : public Component,
   void handle_long_packet_(uint8_t rx_bytes);
   void finish_long_packet_();
   void maybe_switch_long_packet_to_fixed_();
-  uint32_t packet_idle_timeout_ms_() const;
+  void set_long_packet_pktlen_(uint16_t length);
+  uint32_t compute_packet_idle_timeout_ms_() const;
   Trigger<std::vector<uint8_t>, float, float, uint8_t> packet_trigger_;
   std::vector<uint8_t> packet_;
   std::vector<CC1101Listener *> listeners_;
-  packet_length_func_t packet_length_func_{};
+  packet_length_func_t packet_length_func_{nullptr};
   uint16_t packet_length_{0};
   uint16_t packet_expected_length_{0};
   uint32_t packet_last_byte_ms_{0};
+  uint32_t packet_idle_timeout_ms_{0};
+  float long_packet_rssi_{0.0f};
   bool packet_mode_{false};
   bool packet_fixed_mode_armed_{false};
 
@@ -144,130 +151,6 @@ class CC1101Component final : public Component,
   void enter_idle_();
   bool enter_rx_();
   bool enter_tx_();
-};
-
-// Action Wrappers
-template<typename... Ts> class BeginTxAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  void play(const Ts &...x) override { this->parent_->begin_tx(); }
-};
-
-template<typename... Ts> class BeginRxAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  void play(const Ts &...x) override { this->parent_->begin_rx(); }
-};
-
-template<typename... Ts> class ResetAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  void play(const Ts &...x) override { this->parent_->reset(); }
-};
-
-template<typename... Ts> class SetIdleAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  void play(const Ts &...x) override { this->parent_->set_idle(); }
-};
-
-template<typename... Ts> class SendPacketAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  void set_data_template(std::function<std::vector<uint8_t>(Ts...)> func) { this->data_func_ = func; }
-  void set_data_static(const uint8_t *data, size_t len) {
-    this->data_static_ = data;
-    this->data_static_len_ = len;
-  }
-
-  void play(const Ts &...x) override {
-    if (this->data_func_) {
-      auto data = this->data_func_(x...);
-      this->parent_->transmit_packet(data);
-    } else if (this->data_static_ != nullptr) {
-      std::vector<uint8_t> data(this->data_static_, this->data_static_ + this->data_static_len_);
-      this->parent_->transmit_packet(data);
-    }
-  }
-
- protected:
-  std::function<std::vector<uint8_t>(Ts...)> data_func_{};
-  const uint8_t *data_static_{nullptr};
-  size_t data_static_len_{0};
-};
-
-template<typename... Ts> class SetSymbolRateAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(float, symbol_rate)
-  void play(const Ts &...x) override { this->parent_->set_symbol_rate(this->symbol_rate_.value(x...)); }
-};
-
-template<typename... Ts> class SetFrequencyAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(float, frequency)
-  void play(const Ts &...x) override { this->parent_->set_frequency(this->frequency_.value(x...)); }
-};
-
-template<typename... Ts> class SetOutputPowerAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(float, output_power)
-  void play(const Ts &...x) override { this->parent_->set_output_power(this->output_power_.value(x...)); }
-};
-
-template<typename... Ts> class SetModulationTypeAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(Modulation, modulation_type)
-  void play(const Ts &...x) override { this->parent_->set_modulation_type(this->modulation_type_.value(x...)); }
-};
-
-template<typename... Ts> class SetRxAttenuationAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(RxAttenuation, rx_attenuation)
-  void play(const Ts &...x) override { this->parent_->set_rx_attenuation(this->rx_attenuation_.value(x...)); }
-};
-
-template<typename... Ts>
-class SetDcBlockingFilterAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(bool, dc_blocking_filter)
-  void play(const Ts &...x) override { this->parent_->set_dc_blocking_filter(this->dc_blocking_filter_.value(x...)); }
-};
-
-template<typename... Ts> class SetManchesterAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(bool, manchester)
-  void play(const Ts &...x) override { this->parent_->set_manchester(this->manchester_.value(x...)); }
-};
-
-template<typename... Ts> class SetFilterBandwidthAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(float, filter_bandwidth)
-  void play(const Ts &...x) override { this->parent_->set_filter_bandwidth(this->filter_bandwidth_.value(x...)); }
-};
-
-template<typename... Ts> class SetFskDeviationAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(float, fsk_deviation)
-  void play(const Ts &...x) override { this->parent_->set_fsk_deviation(this->fsk_deviation_.value(x...)); }
-};
-
-template<typename... Ts> class SetMskDeviationAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(uint8_t, msk_deviation)
-  void play(const Ts &...x) override { this->parent_->set_msk_deviation(this->msk_deviation_.value(x...)); }
-};
-
-template<typename... Ts> class SetChannelAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(uint8_t, channel)
-  void play(const Ts &...x) override { this->parent_->set_channel(this->channel_.value(x...)); }
-};
-
-template<typename... Ts> class SetChannelSpacingAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(float, channel_spacing)
-  void play(const Ts &...x) override { this->parent_->set_channel_spacing(this->channel_spacing_.value(x...)); }
-};
-
-template<typename... Ts> class SetIfFrequencyAction final : public Action<Ts...>, public Parented<CC1101Component> {
- public:
-  TEMPLATABLE_VALUE(float, if_frequency)
-  void play(const Ts &...x) override { this->parent_->set_if_frequency(this->if_frequency_.value(x...)); }
 };
 
 }  // namespace esphome::cc1101

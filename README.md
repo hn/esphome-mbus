@@ -75,9 +75,9 @@ cap.
 
 This repository temporarily vendors patched copies of two ESPHome core components — `cc1101` under
 [`components/cc1101`](components/cc1101) and `sx127x` under [`components/sx127x`](components/sx127x) —
-because `mbus` needs long-packet RX support (`packet_length`/`payload_length` above 64 bytes, plus a
-`..._length_lambda` for protocols whose length isn't known upfront) that core doesn't have yet for
-either chip:
+because `mbus` needs long-packet RX support (`packet_length`/`payload_length` above 64 bytes, or given
+as a lambda for protocols whose length isn't known upfront) that core doesn't have yet for either chip.
+The copies are based on ESPHome 2026.11 and need that version or newer:
 
 - `cc1101` — long-packet RX — [esphome/esphome#17578](https://github.com/esphome/esphome/pull/17578),
   pending review.
