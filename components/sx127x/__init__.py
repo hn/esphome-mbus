@@ -170,14 +170,12 @@ def validate_config(config: ConfigType) -> ConfigType:
             raise cv.Invalid("Payload length must be <= 255 with LORA")
         if CONF_DIO1_PIN in config:
             raise cv.Invalid("dio1_pin is not available with LORA")
-        if CONF_AFC_BANDWIDTH in config:
-            raise cv.Invalid("afc_bandwidth is not available with LORA")
     else:
         if config[CONF_BANDWIDTH] == "500_0kHz":
             raise cv.Invalid(f"{config[CONF_BANDWIDTH]} is only available with LORA")
-        if CONF_AFC_BANDWIDTH in config and config[CONF_AFC_BANDWIDTH] == "500_0kHz":
+        if config.get(CONF_AFC_BANDWIDTH) == "500_0kHz":
             raise cv.Invalid(
-                f"{config[CONF_AFC_BANDWIDTH]} is not available with FSK/OOK"
+                "500_0kHz is only available with LORA", path=[CONF_AFC_BANDWIDTH]
             )
         if CONF_BITSYNC not in config:
             raise cv.Invalid("Config 'bitsync' required with FSK/OOK")
@@ -208,6 +206,10 @@ def validate_config(config: ConfigType) -> ConfigType:
             raise cv.Invalid(
                 "dio1_pin is only used with payload_length > 64 or a lambda"
             )
+    if CONF_AFC_BANDWIDTH in config and config[CONF_MODULATION] != "FSK":
+        raise cv.Invalid(
+            "Config 'afc_bandwidth' only available with FSK", path=[CONF_AFC_BANDWIDTH]
+        )
     if config[CONF_PA_PIN] == "RFO" and config[CONF_PA_POWER] > 15:
         raise cv.Invalid("PA power must be <= 15 dbm when using the RFO pin")
     if config[CONF_PA_PIN] == "BOOST" and config[CONF_PA_POWER] < 2:
@@ -280,8 +282,7 @@ async def to_code(config: ConfigType) -> None:
     await cg.add_pin(var.set_rst_pin, config[CONF_RST_PIN])
     cg.add(var.set_auto_cal(config[CONF_AUTO_CAL]))
     cg.add(var.set_bandwidth(config[CONF_BANDWIDTH]))
-    if CONF_AFC_BANDWIDTH in config:
-        cg.add(var.set_afc_bandwidth(config[CONF_AFC_BANDWIDTH]))
+    cg.add_optional(var.set_afc_bandwidth, config.get(CONF_AFC_BANDWIDTH))
     cg.add(var.set_frequency(config[CONF_FREQUENCY]))
     cg.add(var.set_deviation(config[CONF_DEVIATION]))
     cg.add(var.set_modulation(config[CONF_MODULATION]))

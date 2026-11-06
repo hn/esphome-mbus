@@ -53,10 +53,7 @@ class SX127x final : public Component,
   void setup() override;
   void loop() override;
   void dump_config() override;
-  void set_afc_bandwidth(SX127xBw afc_bandwidth) {
-    this->afc_bandwidth_ = afc_bandwidth;
-    this->has_afc_bandwidth_ = true;
-  }
+  void set_afc_bandwidth(SX127xBw afc_bandwidth) { this->afc_bandwidth_ = afc_bandwidth; }
   void set_auto_cal(bool auto_cal) { this->auto_cal_ = auto_cal; }
   void set_bandwidth(SX127xBw bandwidth) { this->bandwidth_ = bandwidth; }
   void set_bitrate(uint32_t bitrate) { this->bitrate_ = bitrate; }
@@ -126,7 +123,7 @@ class SX127x final : public Component,
   InternalGPIOPin *dio0_pin_{nullptr};
   InternalGPIOPin *dio1_pin_{nullptr};
   InternalGPIOPin *rst_pin_{nullptr};
-  SX127xBw afc_bandwidth_{};
+  SX127xBw afc_bandwidth_{SX127X_BW_50_0};
   SX127xBw bandwidth_;
   uint32_t bitrate_;
   uint32_t deviation_;
@@ -151,7 +148,6 @@ class SX127x final : public Component,
   bool auto_cal_{false};
   bool bitsync_{false};
   bool crc_enable_{false};
-  bool has_afc_bandwidth_{false};
   bool packet_mode_{false};
   bool rx_start_{false};
 };
