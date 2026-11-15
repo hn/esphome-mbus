@@ -76,21 +76,20 @@ cap.
 This repository temporarily vendors patched copies of two ESPHome core components — `cc1101` under
 [`components/cc1101`](components/cc1101) and `sx127x` under [`components/sx127x`](components/sx127x) —
 because `mbus` needs long-packet RX support (`packet_length`/`payload_length` above 64 bytes, or given
-as a lambda for protocols whose length isn't known upfront) that core doesn't have yet for either chip.
+as a lambda for protocols whose length isn't known upfront) that no ESPHome release has yet for either chip.
 The copies are based on ESPHome 2026.11 and need that version or newer:
 
 - `cc1101` — long-packet RX — [esphome/esphome#17578](https://github.com/esphome/esphome/pull/17578),
-  pending review.
+  merged, expected in ESPHome 2026.12.
 - `sx127x` — long-packet RX plus real RSSI for FSK/OOK —
   [esphome/esphome#18547](https://github.com/esphome/esphome/pull/18547), pending review; plus the
-  `afc_bandwidth` option — [esphome/esphome#22300](https://github.com/esphome/esphome/pull/22300), pending
-  review.
+  `afc_bandwidth` option — [esphome/esphome#22300](https://github.com/esphome/esphome/pull/22300), merged,
+  expected in ESPHome 2026.12.
 
-Both patches are pending review and may be rejected, changed significantly, or take a while either way —
-there's no guarantee they'll be merged as-is, or at all. If and when one lands
-in an ESPHome release, `mbus` can work against core directly for that chip, the local copy can be
-removed from this repository, and it would no longer need to be listed under `components:` in your
-config. Until then, these vendored copies remain the way to get long-packet RX support.
+Once a release contains the change for your chip, `mbus` works against core directly, and you can drop
+that component from `components:` in your config. The `sx127x` long-packet patch is still pending review
+and may be rejected, changed significantly, or take a while — there's no guarantee it'll be merged as-is,
+or at all. Until then, the vendored copy remains the way to get long-packet RX on the SX127x.
 
 They also take the simplest approach available for now, following ESPHome's existing conventions rather
 than introducing a new pattern; a preferred approach for latency-sensitive radio RX, if the core
