@@ -33,6 +33,7 @@
 esphome:
   name: watermeter-waterstarm-sx127x
   friendly_name: Watermeter WaterStarM SX127X
+  min_version: 2026.11.0
   platformio_options:
     board_build.flash_mode: dio
 

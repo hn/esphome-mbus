@@ -33,6 +33,7 @@
 esphome:
   name: watermeter-waterstarm-cc1101
   friendly_name: Watermeter WaterStarM CC1101
+  min_version: 2026.11.0
   platformio_options:
     board_build.flash_mode: dio
 
@@ -86,11 +87,12 @@ cc1101:
   gdo0_pin: GPIO10
 
   # --- RF front-end
+  # Radio settings follow TI application note AN067 (SWRA234), radio link B (wM-Bus T-mode, meter to other)
   frequency: 868.95MHz
   modulation_type: "2-FSK"
   symbol_rate: 103150
   fsk_deviation: 38kHz
-  filter_bandwidth: 325kHz
+  filter_bandwidth: 325kHz  # 270kHz may work better, especially for C-mode
   if_frequency: 203.125kHz
   channel: 0
   channel_spacing: 200kHz
