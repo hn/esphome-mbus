@@ -1,4 +1,5 @@
 #include "mbus.h"
+#include "wired_frame_codec.h"
 
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
@@ -9,6 +10,9 @@ namespace esphome::mbus {
 
 ESPHOME_LOG_TAG(TAG, "mbus");
 
+// CI fields of answers (EN 13757-7:2018, Table 2): 7Ah with the short header, 72h with the long header, 70h
+// application error, 71h alarm. 73h, 76h and 77h are the fixed data structure and the MSB first variants of
+// older editions of the standard; today 73h is the compact frame and 76h and 77h are reserved.
 static constexpr uint8_t MBUS_CI_APP_SHORT = 0x7A;
 static constexpr uint8_t MBUS_CI_VARIABLE_RESPONSE = 0x72;
 static constexpr uint8_t MBUS_CI_VARIABLE_RESPONSE_2 = 0x76;
@@ -16,6 +20,8 @@ static constexpr uint8_t MBUS_CI_FIXED_RESPONSE = 0x73;
 static constexpr uint8_t MBUS_CI_FIXED_RESPONSE_2 = 0x77;
 static constexpr uint8_t MBUS_CI_ERROR = 0x70;
 static constexpr uint8_t MBUS_CI_ALARM = 0x71;
+// Short header: access number, status, configuration field (EN 13757-7:2018, 7.3). Long header: identification
+// number, manufacturer, version and device type in front of that (7.4).
 static constexpr size_t MBUS_APP_SHORT_HEADER_LENGTH = 4;
 static constexpr size_t MBUS_VARIABLE_DATA_HEADER_LENGTH = 12;
 
@@ -29,11 +35,40 @@ static std::string bcd_id_to_string_(const uint8_t *data) {
   return out;
 }
 
-static std::array<uint8_t, 8> secondary_address_bytes_(uint64_t secondary_address) {
-  return {static_cast<uint8_t>(secondary_address >> 32), static_cast<uint8_t>(secondary_address >> 40),
-          static_cast<uint8_t>(secondary_address >> 48), static_cast<uint8_t>(secondary_address >> 56),
-          static_cast<uint8_t>(secondary_address >> 24), static_cast<uint8_t>(secondary_address >> 16),
-          static_cast<uint8_t>(secondary_address >> 8),  static_cast<uint8_t>(secondary_address)};
+// Status byte of the long header (EN 13757-7:2018, 7.5.6, Tables 14 and 15)
+static constexpr uint8_t MBUS_STATUS_APPLICATION_MASK = 0x03;
+static constexpr uint8_t MBUS_STATUS_POWER_LOW = 0x04;
+static constexpr uint8_t MBUS_STATUS_PERMANENT_ERROR = 0x08;
+static constexpr uint8_t MBUS_STATUS_TEMPORARY_ERROR = 0x10;
+static constexpr uint8_t MBUS_STATUS_MANUFACTURER_MASK = 0xE0;
+
+static const LogString *application_status_to_string_(uint8_t status) {
+  switch (status & MBUS_STATUS_APPLICATION_MASK) {
+    case 0x01:
+      return LOG_STR("application busy");
+    case 0x02:
+      return LOG_STR("application error");
+    case 0x03:
+      return LOG_STR("abnormal condition");
+    default:
+      return LOG_STR("no application error");
+  }
+}
+
+void MBusComponent::log_status_change_(uint8_t status) {
+  if (status == this->last_status_) {
+    return;
+  }
+  this->last_status_ = status;
+  if (status == 0) {
+    ESP_LOGI(TAG, "Meter status back to 0x00");
+    return;
+  }
+  ESP_LOGW(TAG, "Meter status 0x%02X: %s%s%s%s%s", status, LOG_STR_ARG(application_status_to_string_(status)),
+           (status & MBUS_STATUS_POWER_LOW) != 0 ? ", power low" : "",
+           (status & MBUS_STATUS_PERMANENT_ERROR) != 0 ? ", permanent error" : "",
+           (status & MBUS_STATUS_TEMPORARY_ERROR) != 0 ? ", temporary error" : "",
+           (status & MBUS_STATUS_MANUFACTURER_MASK) != 0 ? ", manufacturer specific bits" : "");
 }
 
 void MBusComponent::handle_short_application_frame_(const MBusApplicationFrame &frame) {
@@ -95,7 +130,7 @@ void MBusComponent::handle_short_application_frame_(const MBusApplicationFrame &
     ESP_LOGW(TAG, "Mode 5 decryption failed");
     return;
   }
-  // Mode 5 plaintext starts with two 0x2F verification bytes; anything else means a wrong key
+  // Mode 5 plaintext starts with two bytes 2Fh (EN 13757-7:2018, 9.4.4.2); anything else means a wrong key
   if (decrypted.size() < 2 || decrypted[0] != 0x2F || decrypted[1] != 0x2F) {
     ESP_LOGW(TAG, "Mode 5 decryption failed: no 0x2F2F verification bytes, wrong encryption_key?");
     return;
@@ -126,16 +161,14 @@ void MBusComponent::handle_application_frame_(const MBusApplicationFrame &frame)
       return;
     }
 
-    if (this->has_secondary_address_) {
-      const std::array<uint8_t, 8> expected = secondary_address_bytes_(this->secondary_address_);
-      if (!std::equal(expected.begin(), expected.end(), frame.data)) {
+    if (this->has_secondary_address_ &&
+        !wired_frame_codec::secondary_address_matches(this->secondary_address_, frame.data)) {
 #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
-        char hex[format_hex_pretty_size(8)];
-        ESP_LOGV(TAG, "Ignoring variable data response for secondary address %s",
-                 format_hex_pretty_to(hex, frame.data, 8));
+      char hex[format_hex_pretty_size(8)];
+      ESP_LOGV(TAG, "Ignoring variable data response for secondary address %s",
+               format_hex_pretty_to(hex, frame.data, 8));
 #endif
-        return;
-      }
+      return;
     }
 
     const uint16_t manufacturer = encode_uint16(frame.data[5], frame.data[4]);
@@ -143,14 +176,19 @@ void MBusComponent::handle_application_frame_(const MBusApplicationFrame &frame)
     this->manufacturer_to_string_(manufacturer, manufacturer_str);
     const uint8_t access_number = frame.data[8];
     const uint8_t status = frame.data[9];
-    const uint16_t signature = encode_uint16(frame.data[11], frame.data[10]);
+    const uint16_t config = encode_uint16(frame.data[11], frame.data[10]);
     ESP_LOGD(TAG,
              "Variable data: CI=0x%02X ID=%s M=%s Version=0x%02X Medium=0x%02X AccessNr=%u Status=0x%02X "
-             "Signature=0x%04X",
+             "Config=0x%04X",
              frame.ci, bcd_id_to_string_(frame.data).c_str(), manufacturer_str, frame.data[6], frame.data[7],
-             access_number, status, signature);
-    if (signature != 0x0000) {
-      ESP_LOGW(TAG, "Variable data signature/encryption field 0x%04X not implemented yet", signature);
+             access_number, status, config);
+    this->log_status_change_(status);
+    // A configuration field other than 0 announces encrypted data (EN 13757-7:2018, 7.5.8), which is not
+    // decoded behind a long header yet
+    if (config != 0x0000) {
+      ESP_LOGW(TAG, "Variable data with configuration field 0x%04X (encryption mode %u) not implemented yet", config,
+               (config >> 8) & 0x1F);
+      return;
     }
 
     std::vector<uint8_t> payload(frame.data + MBUS_VARIABLE_DATA_HEADER_LENGTH, frame.data + frame.length);
@@ -189,7 +227,8 @@ bool MBusComponent::decrypt_mode_5_(const MBusApplicationFrame &frame, size_t pa
     return false;
   }
 
-  // Mode 5 IV: manufacturer, address, version and device type (8 bytes), then the access number 8 times
+  // Mode 5 IV: manufacturer, identification number, version and device type, then the access number 8 times
+  // (EN 13757-7:2018, Table 48). With the short header these come from the link layer.
   uint8_t iv[Aes128CbcDecryptor::BLOCK_SIZE];
   std::copy_n(frame.meter_address.data(), frame.meter_address.size(), iv);
   std::fill_n(iv + 8, 8, access_number);

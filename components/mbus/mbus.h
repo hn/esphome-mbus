@@ -17,12 +17,14 @@
 #endif
 
 #include "crypto.h"
+#include "wired_frame_codec.h"
 
 #include <array>
 #include <cstdio>
 #include <cstdint>
 #include <deque>
 #include <initializer_list>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -34,25 +36,59 @@ static constexpr size_t MBUS_LOG_HEX_MAX_BYTES = 64;
 enum class WMBusFrameFormat : uint8_t { WMBUS_FRAME_FORMAT_UNKNOWN, WMBUS_FRAME_FORMAT_A, WMBUS_FRAME_FORMAT_B };
 
 #ifdef USE_MBUS_WIRED_UART
+enum class MBusWiredOperation : uint8_t {
+  // SND_NKE, selection if needed, REQ_UD2 until the meter has no more datagrams
+  MBUS_WIRED_OPERATION_READOUT,
+  MBUS_WIRED_OPERATION_SEND_NKE,
+  MBUS_WIRED_OPERATION_REQUEST_UD2,
+  MBUS_WIRED_OPERATION_SEND_UD,
+};
+
 enum class MBusWiredUartState : uint8_t {
   MBUS_WIRED_UART_STATE_IDLE,
   MBUS_WIRED_UART_STATE_START,
-  MBUS_WIRED_UART_STATE_SEND_RESET_1,
-  MBUS_WIRED_UART_STATE_WAIT_RESET_1,
-  MBUS_WIRED_UART_STATE_SEND_RESET_2,
-  MBUS_WIRED_UART_STATE_WAIT_RESET_2,
-  MBUS_WIRED_UART_STATE_PURGE_RX,
+  MBUS_WIRED_UART_STATE_WAKEUP_SEND,
+  MBUS_WIRED_UART_STATE_WAKEUP_DRAIN,
+  MBUS_WIRED_UART_STATE_WAKEUP_PAUSE,
+  MBUS_WIRED_UART_STATE_SEND_NKE,
+  MBUS_WIRED_UART_STATE_WAIT_NKE,
+  MBUS_WIRED_UART_STATE_WAIT_GAP,
   MBUS_WIRED_UART_STATE_SEND_SELECT_SECONDARY,
   MBUS_WIRED_UART_STATE_WAIT_SELECT_ACK,
   MBUS_WIRED_UART_STATE_WAIT_SELECT_SETTLE,
-  MBUS_WIRED_UART_STATE_SEND_REQ_UD2,
-  MBUS_WIRED_UART_STATE_WAIT_RESPONSE_HEADER,
-  MBUS_WIRED_UART_STATE_WAIT_RESPONSE_BODY,
-  MBUS_WIRED_UART_STATE_DONE,
-  MBUS_WIRED_UART_STATE_RETRY,
-  MBUS_WIRED_UART_STATE_FAILED,
+  MBUS_WIRED_UART_STATE_SEND_DATAGRAM,
+  MBUS_WIRED_UART_STATE_WAIT_DATAGRAM,
+  MBUS_WIRED_UART_STATE_WAIT_QUIET,
 };
 #endif
+
+// Result of a datagram sent with send_nke(), request_ud2() or send_ud()
+enum class MBusResult : uint8_t {
+  MBUS_RESULT_OK,
+  // Another exchange is running on this instance or on its UART
+  MBUS_RESULT_BUSY,
+  MBUS_RESULT_NO_RESPONSE,
+  MBUS_RESULT_INVALID_RESPONSE,
+  // The datagram cannot be sent: too much data, or the instance has no wired UART
+  MBUS_RESULT_INVALID_REQUEST,
+};
+
+const LogString *mbus_result_to_str(MBusResult result);
+
+// Answer to a datagram. data is only valid while the callback runs.
+struct MBusResponse {
+  // Single character acknowledge; ci and data are not set then
+  bool ack{false};
+  uint8_t ci{0};
+  // Application data behind the header: behind the long header with CI 72h and 76h, behind the short header with
+  // 7Ah, everything behind the CI field else
+  std::span<const uint8_t> data{};
+};
+
+using mbus_response_callback_t = void (*)(void *context, MBusResult result, const MBusResponse &response);
+
+// The part of application data that follows the manufacturer data header (DIF 0Fh or 1Fh); empty without one
+std::span<const uint8_t> manufacturer_data(std::span<const uint8_t> data);
 
 struct MBusReceiveMeta {
   bool has_rssi{false};
@@ -204,7 +240,8 @@ class MBusRecordMatcher {
   bool has_vife_{false};
 };
 
-class MBusComponent : public Component
+// Radio instances only listen; their update interval stays at the PollingComponent default "never".
+class MBusComponent : public PollingComponent
 #ifdef USE_MBUS_CC1101
     ,
                       public cc1101::CC1101Listener
@@ -223,6 +260,9 @@ class MBusComponent : public Component
 #endif
 {
  public:
+  // A datagram and up to two repetitions (EN 1434-3:2008, Annex D.2.1)
+  static constexpr uint8_t WIRED_MAX_ATTEMPTS = 3;
+
 #ifdef USE_MBUS_CC1101
   void set_radio_cc1101(cc1101::CC1101Component *radio) { this->radio_cc1101_ = radio; }
 #endif
@@ -234,7 +274,12 @@ class MBusComponent : public Component
 #endif
 #ifdef USE_MBUS_WIRED_UART
   void set_wired_uart(uart::UARTComponent *uart) { this->set_uart_parent(uart); }
-  void set_wired_update_interval(uint32_t update_interval) { this->wired_update_interval_ = update_interval; }
+  void set_wakeup_after_idle(uint32_t wakeup_after_idle) {
+    this->wired_wakeup_after_idle_ = wakeup_after_idle;
+    this->wired_wakeup_enabled_ = true;
+  }
+  void set_max_telegrams(uint8_t max_telegrams) { this->wired_max_telegrams_ = max_telegrams; }
+  void set_primary_address(uint8_t primary_address) { this->wired_address_ = primary_address; }
 #endif
   void set_config_id(const std::string &config_id) { this->config_id_ = config_id; }
   void set_secondary_address(uint64_t secondary_address) {
@@ -254,8 +299,22 @@ class MBusComponent : public Component
     this->has_encryption_key_ = true;
   }
 
+  // One datagram to the meter of this instance, wired instances only. The return value tells whether it was
+  // started; the callback gets the outcome. With a secondary address the selection is sent first.
+  // max_retries: repetitions of the datagram if the answer is missing or invalid.
+  // SND_NKE; resets the frame count bits
+  MBusResult send_nke(uint8_t max_retries = WIRED_MAX_ATTEMPTS - 1, mbus_response_callback_t callback = nullptr,
+                      void *context = nullptr);
+  // REQ_UD2 without SND_NKE in front; does not read on at DIF 1Fh, the next call gets the next datagram
+  MBusResult request_ud2(uint8_t max_retries = WIRED_MAX_ATTEMPTS - 1, mbus_response_callback_t callback = nullptr,
+                         void *context = nullptr);
+  // SND_UD; the answer is an acknowledge or RSP_UD. Repeat only what is harmless to do twice.
+  MBusResult send_ud(uint8_t ci, const uint8_t *data, size_t length, uint8_t max_retries = 0,
+                     mbus_response_callback_t callback = nullptr, void *context = nullptr);
+
   void setup() override;
   void loop() override;
+  void update() override;
   void dump_config() override;
   // Must run after any bus/radio this instance depends on: the UART bus is setup_priority::BUS (1000),
   // SX126x/SX127x are setup_priority::PROCESSOR (400), but CC1101 does not override the Component default
@@ -290,6 +349,10 @@ class MBusComponent : public Component
   bool has_meter_id_{false};
   bool has_secondary_address_{false};
   bool dump_records_enabled_{false};
+  // Status byte of the last long header, to log changes only
+  uint8_t last_status_{0};
+  // Set by the record parser on DIF 1Fh: the meter has more datagrams (EN 13757-3:2018, 6.5)
+  bool more_records_follow_{false};
   std::vector<MBusRecordListener *> record_listeners_;
 
   // Set up once in setup() from encryption_key_ and reused for every telegram
@@ -297,16 +360,44 @@ class MBusComponent : public Component
 
 #ifdef USE_MBUS_WIRED_UART
   MBusWiredUartState wired_state_{MBusWiredUartState::MBUS_WIRED_UART_STATE_IDLE};
+  MBusWiredUartState wired_gap_next_state_{MBusWiredUartState::MBUS_WIRED_UART_STATE_IDLE};
+  MBusWiredUartState wired_retry_state_{MBusWiredUartState::MBUS_WIRED_UART_STATE_IDLE};
+  // FCB of the next REQ_UD2 and of the next SND_UD: one per direction (EN 13757-2:2018, 5.7.7)
+  bool wired_fcb_req_{true};
+  bool wired_fcb_snd_{true};
+  MBusWiredOperation wired_operation_{MBusWiredOperation::MBUS_WIRED_OPERATION_READOUT};
+  uint8_t wired_max_attempts_{WIRED_MAX_ATTEMPTS};
+  MBusResult wired_failure_result_{MBusResult::MBUS_RESULT_NO_RESPONSE};
+  mbus_response_callback_t wired_callback_{nullptr};
+  void *wired_callback_context_{nullptr};
+  // SND_UD datagram, kept for its repetitions
+  std::array<uint8_t, wired_frame_codec::LONG_FRAME_MAX_SIZE> wired_tx_buffer_{};
+  size_t wired_tx_size_{0};
+  // Address of the link layer datagrams: the primary address, or 253 for a meter selected by its secondary
+  // address
+  uint8_t wired_address_{wired_frame_codec::ADDRESS_SELECTED};
+  uint8_t wired_nke_count_{0};
+  // Wake-up of the optical interface: sent before a datagram if the line was idle for longer than this
+  uint32_t wired_wakeup_after_idle_{0};
+  // End of the last byte sent or received
+  uint32_t wired_last_activity_{0};
+  // Start of the wake-up on the line and what is left to send of it
+  uint32_t wired_wakeup_start_{0};
+  uint32_t wired_wakeup_sent_{0};
+  uint32_t wired_wakeup_remaining_{0};
+  MBusWiredUartState wired_wakeup_next_state_{MBusWiredUartState::MBUS_WIRED_UART_STATE_IDLE};
+  bool wired_wakeup_enabled_{false};
+  // Set at boot and after a missing answer: the meter is taken to be asleep whatever the idle time says
+  bool wired_wakeup_forced_{true};
+  uint8_t wired_max_telegrams_{8};
+  uint8_t wired_telegram_count_{0};
+  // Instances with a wired UART, chained to find out whether the bus of this one is in use
+  MBusComponent *wired_next_{nullptr};
   uint8_t wired_retry_count_{0};
   uint32_t wired_timer_{0};
-  uint32_t wired_timeout_short_{0};
-  uint32_t wired_timeout_long_{0};
-  uint32_t wired_update_interval_{60000};
-  uint32_t wired_last_update_{0};
-  std::vector<uint8_t> wired_rx_buffer_;
-  size_t wired_expected_length_{0};
-  bool wired_update_due_{false};
-  static constexpr uint8_t WIRED_MAX_RETRIES = 3;
+  uint32_t wired_timeout_{0};
+  wired_frame_codec::FrameReceiver wired_receiver_;
+  const char *wired_failure_reason_{""};
 #endif
 
   std::deque<PendingRadioPacket> pending_packets_;
@@ -321,24 +412,42 @@ class MBusComponent : public Component
   void handle_wmbus_link_frame_(const std::vector<uint8_t> &frame, const MBusReceiveMeta &meta);
   void handle_application_frame_(const MBusApplicationFrame &frame);
   void handle_short_application_frame_(const MBusApplicationFrame &frame);
-  bool handle_wired_link_frame_(const std::vector<uint8_t> &frame, const MBusReceiveMeta &meta = {});
+  void log_status_change_(uint8_t status);
+  void handle_wired_link_frame_(const wired_frame_codec::Frame &frame);
   void init_decryptor_();
   bool decrypt_mode_5_(const MBusApplicationFrame &frame, size_t payload_offset, size_t encrypted_length,
                        uint8_t access_number, std::vector<uint8_t> *out);
   // Calls callback(const MBusRecord &) for every record; defined and only used in records.cpp
-  template<typename F> void parse_records_(const std::vector<uint8_t> &payload, F &&callback) const;
-  void process_records_(const std::vector<uint8_t> &payload) const;
-  void dump_records_(const std::vector<uint8_t> &payload) const;
+  template<typename F> void parse_records_(const std::vector<uint8_t> &payload, F &&callback);
+  void process_records_(const std::vector<uint8_t> &payload);
+  void dump_records_(const std::vector<uint8_t> &payload);
+  bool is_wired_() const {
+#ifdef USE_MBUS_WIRED_UART
+    return this->parent_ != nullptr;
+#else
+    return false;
+#endif
+  }
   void publish_record_(const MBusRecord &record) const;
 #ifdef USE_MBUS_WIRED_UART
   void setup_wired_uart_();
   void loop_wired_uart_();
-  bool wired_timeout_elapsed_(uint32_t now, uint32_t timeout) const;
-  void retry_wired_uart_(const char *reason);
-  void reset_wired_transaction_();
-  std::array<uint8_t, 5> build_wired_snd_nke_frame_() const;
-  std::array<uint8_t, 5> build_wired_req_ud2_frame_() const;
-  std::array<uint8_t, 17> build_wired_select_secondary_frame_() const;
+  void start_wired_readout_();
+  bool wired_timeout_elapsed_(uint32_t now) const;
+  void drain_wired_rx_();
+  void send_wired_(const uint8_t *data, size_t size, size_t max_response_size, uint32_t now);
+  void send_wired_short_(uint8_t control, size_t max_response_size, uint32_t now);
+  void wired_begin_exchange_(MBusWiredUartState send_state, uint8_t attempts);
+  wired_frame_codec::ReceiveResult receive_wired_();
+  void retry_wired_uart_(const char *reason, MBusResult result, uint32_t now);
+  void finish_wired_transaction_(MBusResult result);
+  MBusResult start_wired_operation_(MBusWiredOperation operation, uint8_t attempts, mbus_response_callback_t callback,
+                                    void *context);
+  MBusResult wired_available_() const;
+  bool wired_uart_busy_() const;
+  bool wired_wakeup_(MBusWiredUartState next_state, uint32_t now);
+  void set_wired_parity_(uart::UARTParityOptions parity);
+  void wired_gap_(MBusWiredUartState next_state, uint32_t now);
 #endif
   size_t packet_len_frame_a_(uint8_t l_field) const;
   size_t packet_len_frame_b_(uint8_t l_field) const;

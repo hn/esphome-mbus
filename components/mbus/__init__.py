@@ -1,14 +1,20 @@
+from esphome import automation
 import esphome.codegen as cg
 from esphome.components import cc1101, sx126x, sx127x, uart
 import esphome.config_validation as cv
 from esphome.const import (
+    CONF_DATA,
     CONF_ID,
+    CONF_ON_ERROR,
+    CONF_ON_RESPONSE,
     CONF_STORAGE,
     CONF_UPDATE_INTERVAL,
     PLATFORM_ESP32,
     PLATFORM_ESP8266,
+    PLATFORM_HOST,
     PLATFORM_RP2040,
 )
+from esphome.core import CORE, ID
 from esphome.cpp_generator import MockObj
 from esphome.types import ConfigType
 
@@ -17,14 +23,19 @@ DOMAIN = "mbus"
 MULTI_CONF = True
 
 mbus_ns = cg.esphome_ns.namespace("mbus")
-MBusComponent = mbus_ns.class_("MBusComponent", cg.Component)
+MBusComponent = mbus_ns.class_("MBusComponent", cg.PollingComponent)
 
+CONF_CI = "ci"
+CONF_CONTINUE_ON_ERROR = "continue_on_error"
 CONF_DIF = "dif"
 CONF_DUMP_RECORDS = "dump_records"
 CONF_ENCRYPTION_KEY = "encryption_key"
 CONF_FUNCTION = "function"
 CONF_MBUS_ID = "mbus_id"
+CONF_MAX_RETRIES = "max_retries"
+CONF_MAX_TELEGRAMS = "max_telegrams"
 CONF_METER_ID = "meter_id"
+CONF_PRIMARY_ADDRESS = "primary_address"
 CONF_RADIO_CC1101_ID = "radio_cc1101_id"
 CONF_RADIO_SX126X_ID = "radio_sx126x_id"
 CONF_RADIO_SX127X_ID = "radio_sx127x_id"
@@ -34,6 +45,8 @@ CONF_TARIFF = "tariff"
 CONF_VIF = "vif"
 CONF_VIF_EXT = "vif_ext"
 CONF_VIFE = "vife"
+CONF_WAIT_FOR_RESPONSE = "wait_for_response"
+CONF_WAKEUP_AFTER_IDLE = "wakeup_after_idle"
 CONF_WIRED_UART_ID = "wired_uart_id"
 
 SOURCE_KEYS = [
@@ -44,13 +57,52 @@ SOURCE_KEYS = [
 ]
 
 
+def validate_primary_address(value: object) -> int:
+    # 0 is the address of unconfigured slaves, 1 to 250 are assignable, 254 is answered by every slave
+    # (EN 13757-2:2018, 5.7.5)
+    value = cv.int_range(min=0, max=254)(value)
+    if 251 <= value <= 253:
+        raise cv.Invalid(
+            "primary_address must be 0 to 250 or 254; use secondary_address to select a meter"
+        )
+    return value
+
+
+def validate_host_options(config: ConfigType) -> ConfigType:
+    if CORE.is_host and CONF_ENCRYPTION_KEY in config:
+        raise cv.Invalid("encryption_key is not supported on the host platform")
+    return config
+
+
 def validate_source_options(config: ConfigType) -> ConfigType:
-    if CONF_WIRED_UART_ID in config and CONF_SECONDARY_ADDRESS not in config:
-        raise cv.Invalid("secondary_address is required with wired_uart_id")
-    if CONF_WIRED_UART_ID not in config and CONF_SECONDARY_ADDRESS in config:
-        raise cv.Invalid("secondary_address is only valid with wired_uart_id")
+    wired = CONF_WIRED_UART_ID in config
+    addresses = [
+        key for key in (CONF_PRIMARY_ADDRESS, CONF_SECONDARY_ADDRESS) if key in config
+    ]
+    if wired and len(addresses) != 1:
+        raise cv.Invalid(
+            "wired_uart_id requires exactly one of primary_address and secondary_address"
+        )
+    if not wired and addresses:
+        raise cv.Invalid(f"{addresses[0]} is only valid with wired_uart_id")
     if CONF_WIRED_UART_ID not in config and CONF_UPDATE_INTERVAL in config:
         raise cv.Invalid("update_interval is only valid with wired_uart_id")
+    if not wired and CONF_MAX_TELEGRAMS in config:
+        raise cv.Invalid("max_telegrams is only valid with wired_uart_id")
+    if CONF_WAKEUP_AFTER_IDLE in config:
+        if not wired:
+            raise cv.Invalid("wakeup_after_idle is only valid with wired_uart_id")
+        # Every wake-up costs the meter battery, so the interval has to be a decision
+        if CONF_UPDATE_INTERVAL not in config:
+            raise cv.Invalid(
+                "wakeup_after_idle requires update_interval to be set (never turns "
+                "the cyclic readout off)"
+            )
+        # The wake-up changes the parity at runtime, which the other UARTs cannot do
+        if not (CORE.is_esp32 or CORE.is_esp8266 or CORE.is_host):
+            raise cv.Invalid("wakeup_after_idle is only supported on ESP32 and ESP8266")
+    if CONF_WIRED_UART_ID in config and CONF_UPDATE_INTERVAL not in config:
+        config = {**config, CONF_UPDATE_INTERVAL: cv.update_interval("60s")}
     return config
 
 
@@ -62,6 +114,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_RADIO_SX126X_ID): cv.use_id(sx126x.SX126x),
             cv.Optional(CONF_RADIO_SX127X_ID): cv.use_id(sx127x.SX127x),
             cv.Optional(CONF_WIRED_UART_ID): cv.use_id(uart.UARTComponent),
+            cv.Optional(CONF_MAX_TELEGRAMS): cv.int_range(min=1, max=255),
+            cv.Optional(CONF_WAKEUP_AFTER_IDLE): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_PRIMARY_ADDRESS): validate_primary_address,
             cv.Optional(CONF_SECONDARY_ADDRESS): cv.hex_uint64_t,
             cv.Optional(CONF_UPDATE_INTERVAL): cv.update_interval,
             cv.Optional(CONF_ENCRYPTION_KEY): cv.bind_key(name="encryption_key"),
@@ -69,8 +124,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_DUMP_RECORDS, default=False): cv.boolean,
         }
     ).extend(cv.COMPONENT_SCHEMA),
-    # Mode 5 decryption needs PSA/mbedTLS (ESP32) or BearSSL (ESP8266, RP2040)
-    cv.only_on([PLATFORM_ESP32, PLATFORM_ESP8266, PLATFORM_RP2040]),
+    # Mode 5 decryption needs PSA/mbedTLS (ESP32) or BearSSL (ESP8266, RP2040). The host platform has
+    # neither and is there for tests of the wired transport.
+    cv.only_on([PLATFORM_ESP32, PLATFORM_ESP8266, PLATFORM_HOST, PLATFORM_RP2040]),
+    validate_host_options,
     cv.has_exactly_one_key(*SOURCE_KEYS),
     validate_source_options,
 )
@@ -115,6 +172,22 @@ async def register_record_matcher(var: MockObj, config: ConfigType) -> None:
     cg.add(parent.register_record_listener(var))
 
 
+# 8E1 is fixed (EN 13757-2:2018, 5.4), the baud rate is not (5.2). The pins are not claimed: several
+# instances may share one bus.
+_WIRED_UART_SCHEMA = uart.final_validate_device_schema(
+    "mbus", uart_bus=CONF_WIRED_UART_ID, data_bits=8, parity="EVEN", stop_bits=1
+)
+
+
+def _final_validate(config: ConfigType) -> ConfigType:
+    if CONF_WIRED_UART_ID in config:
+        _WIRED_UART_SCHEMA(config)
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
+
+
 async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
@@ -141,5 +214,140 @@ async def to_code(config: ConfigType) -> None:
         cg.add_define("USE_MBUS_WIRED_UART")
         wired_uart = await cg.get_variable(config[CONF_WIRED_UART_ID])
         cg.add(var.set_wired_uart(wired_uart))
-        cg.add(var.set_secondary_address(config[CONF_SECONDARY_ADDRESS]))
-        cg.add(var.set_wired_update_interval(config.get(CONF_UPDATE_INTERVAL, 60000)))
+        cg.add_optional(var.set_max_telegrams, config.get(CONF_MAX_TELEGRAMS))
+        cg.add_optional(var.set_wakeup_after_idle, config.get(CONF_WAKEUP_AFTER_IDLE))
+        cg.add_optional(var.set_primary_address, config.get(CONF_PRIMARY_ADDRESS))
+        cg.add_optional(var.set_secondary_address, config.get(CONF_SECONDARY_ADDRESS))
+
+
+MBusResult = mbus_ns.enum("MBusResult", is_class=True)
+SendNkeAction = mbus_ns.class_("SendNkeAction", automation.Action)
+RequestUd2Action = mbus_ns.class_("RequestUd2Action", automation.Action)
+SendUdAction = mbus_ns.class_("SendUdAction", automation.Action)
+
+_BYTE_SPAN = cg.std_span.template(cg.uint8.operator("const"))
+# A long frame carries up to 252 bytes behind the CI field (EN 13757-2:2018, 5.7)
+MAX_DATA_LENGTH = 252
+
+
+def _validate_datagram_action(config: ConfigType) -> ConfigType:
+    if not config[CONF_WAIT_FOR_RESPONSE] and not config[CONF_CONTINUE_ON_ERROR]:
+        raise cv.Invalid(
+            f"'{CONF_CONTINUE_ON_ERROR}' cannot be false if '{CONF_WAIT_FOR_RESPONSE}' "
+            "is false, because the automation does not wait for the result",
+            path=[CONF_CONTINUE_ON_ERROR],
+        )
+    return config
+
+
+_DATAGRAM_ACTION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(MBusComponent),
+        cv.Optional(CONF_WAIT_FOR_RESPONSE, default=True): cv.boolean,
+        cv.Optional(CONF_CONTINUE_ON_ERROR, default=True): cv.boolean,
+        cv.Optional(CONF_ON_RESPONSE): automation.validate_action_list,
+        cv.Optional(CONF_ON_ERROR): automation.validate_action_list,
+    }
+)
+
+# Repeating SND_NKE or REQ_UD2 does no harm, so they get the two repetitions of EN 1434-3:2008, Annex D.2.1
+_SIMPLE_DATAGRAM_ACTION_SCHEMA = automation.maybe_simple_id(
+    cv.All(
+        _DATAGRAM_ACTION_SCHEMA.extend(
+            {cv.Optional(CONF_MAX_RETRIES, default=2): cv.int_range(min=0, max=10)}
+        ),
+        _validate_datagram_action,
+    )
+)
+
+_SEND_UD_ACTION_SCHEMA = cv.All(
+    _DATAGRAM_ACTION_SCHEMA.extend(
+        {
+            cv.Required(CONF_CI): cv.templatable(cv.hex_uint8_t),
+            cv.Optional(CONF_DATA, default=[]): cv.templatable(
+                cv.All(cv.ensure_list(cv.hex_uint8_t), cv.Length(max=MAX_DATA_LENGTH))
+            ),
+            cv.Optional(CONF_MAX_RETRIES, default=0): cv.int_range(min=0, max=10),
+        }
+    ),
+    _validate_datagram_action,
+)
+
+
+async def _datagram_action_to_code(
+    config: ConfigType,
+    action_id: ID,
+    template_arg: cg.TemplateArguments,
+    args: list[tuple],
+) -> MockObj:
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    # Both default to true in C++ as well
+    if not config[CONF_WAIT_FOR_RESPONSE]:
+        cg.add(var.set_wait_for_response(False))
+    if not config[CONF_CONTINUE_ON_ERROR]:
+        cg.add(var.set_continue_on_error(False))
+    if config[CONF_MAX_RETRIES]:
+        cg.add(var.set_max_retries(config[CONF_MAX_RETRIES]))
+    if on_response := config.get(CONF_ON_RESPONSE):
+        response_template_arg = cg.TemplateArguments(
+            *template_arg, cg.bool_, cg.uint8, _BYTE_SPAN
+        )
+        response_args = [
+            *args,
+            (cg.bool_, "ack"),
+            (cg.uint8, "ci"),
+            (_BYTE_SPAN, "x"),
+        ]
+        actions = await automation.build_action_list(
+            on_response, response_template_arg, response_args
+        )
+        cg.add(var.add_on_response(actions))
+    if on_error := config.get(CONF_ON_ERROR):
+        error_template_arg = cg.TemplateArguments(*template_arg, MBusResult)
+        error_args = [*args, (MBusResult, "error")]
+        actions = await automation.build_action_list(
+            on_error, error_template_arg, error_args
+        )
+        cg.add(var.add_on_error(actions))
+    return var
+
+
+@automation.register_action(
+    "mbus.send_nke", SendNkeAction, _SIMPLE_DATAGRAM_ACTION_SCHEMA, synchronous=False
+)
+@automation.register_action(
+    "mbus.request_ud2",
+    RequestUd2Action,
+    _SIMPLE_DATAGRAM_ACTION_SCHEMA,
+    synchronous=False,
+)
+async def datagram_action_to_code(
+    config: ConfigType,
+    action_id: ID,
+    template_arg: cg.TemplateArguments,
+    args: list[tuple],
+) -> MockObj:
+    return await _datagram_action_to_code(config, action_id, template_arg, args)
+
+
+@automation.register_action(
+    "mbus.send_ud", SendUdAction, _SEND_UD_ACTION_SCHEMA, synchronous=False
+)
+async def send_ud_action_to_code(
+    config: ConfigType,
+    action_id: ID,
+    template_arg: cg.TemplateArguments,
+    args: list[tuple],
+) -> MockObj:
+    var = await _datagram_action_to_code(config, action_id, template_arg, args)
+    ci = await cg.templatable(config[CONF_CI], args, cg.uint8)
+    cg.add(var.set_ci(ci))
+    await automation.templatable_bytes(
+        config[CONF_DATA],
+        args,
+        var.set_data_template,
+        var.set_data_static,
+        "mbus_send_ud_data",
+    )
+    return var

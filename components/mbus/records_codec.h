@@ -8,6 +8,8 @@
 
 namespace esphome::mbus::records_codec {
 
+// Length of the data from the data field of the DIF (EN 13757-3:2018, Table 4); 0 for the variable length
+// code Dh, whose length is the LVAR byte
 inline size_t dif_data_length(uint8_t dif) {
   switch (dif & 0x0F) {
     case 0x0:
@@ -101,6 +103,8 @@ inline double decode_real32_le(const uint8_t *data) {
   return value;
 }
 
+// Data length behind an LVAR byte (EN 13757-3:2018, Table 5). The BCD ranges are taken up to CFh and DFh,
+// although the table ends them at C9h and D9h.
 inline bool variable_data_length(uint8_t lvar, size_t *length) {
   if (lvar <= 0xBF) {
     *length = lvar;
@@ -118,8 +122,13 @@ inline bool variable_data_length(uint8_t lvar, size_t *length) {
     *length = lvar - 0xE0;
     return true;
   }
-  if (lvar >= 0xF0 && lvar <= 0xFA) {
-    *length = lvar - 0xF0;
+  // Binary numbers of 16, 20, 24, 28 and 32 bytes, then 48 bytes; the codes behind are reserved
+  if (lvar >= 0xF0 && lvar <= 0xF4) {
+    *length = 4 * (lvar - 0xEC);
+    return true;
+  }
+  if (lvar == 0xF5) {
+    *length = 48;
     return true;
   }
   return false;
@@ -132,6 +141,55 @@ inline std::string decode_variable_ascii(const uint8_t *data, size_t length) {
     value.push_back(static_cast<char>(data[i - 1]));
   }
   return value;
+}
+
+// Offset of the manufacturer specific data: the byte behind the MDH, which is the first DIF 0Fh or 1Fh
+// (EN 13757-3:2018, 6.1). The records in front of it are walked, so a 0Fh inside a record is not taken for it.
+// Returns length if there is no MDH or the records cannot be walked.
+inline size_t manufacturer_data_offset(const uint8_t *data, size_t length) {
+  size_t pos = 0;
+  while (pos < length) {
+    const uint8_t dif = data[pos++];
+    if (dif == 0x2F) {
+      continue;
+    }
+    if (dif == 0x0F || dif == 0x1F) {
+      return pos;
+    }
+    uint8_t extension = dif & 0x80;
+    while (extension != 0) {
+      if (pos >= length) {
+        return length;
+      }
+      extension = data[pos++] & 0x80;
+    }
+    if (pos >= length) {
+      return length;
+    }
+    const uint8_t vif = data[pos++];
+    // Plain text VIF: a length byte and that many characters
+    if ((vif & 0x7F) == 0x7C) {
+      if (pos >= length) {
+        return length;
+      }
+      pos += static_cast<size_t>(data[pos]) + 1;
+    }
+    extension = vif & 0x80;
+    while (extension != 0) {
+      if (pos >= length) {
+        return length;
+      }
+      extension = data[pos++] & 0x80;
+    }
+    size_t data_length = dif_data_length(dif);
+    if ((dif & 0x0F) == 0x0D) {
+      if (pos >= length || !variable_data_length(data[pos++], &data_length)) {
+        return length;
+      }
+    }
+    pos += data_length;
+  }
+  return length;
 }
 
 }  // namespace esphome::mbus::records_codec

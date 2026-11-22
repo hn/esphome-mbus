@@ -1,4 +1,5 @@
 #include "mbus.h"
+#include "records_codec.h"
 
 #include "esphome/core/log.h"
 
@@ -11,6 +12,26 @@ void MBusComponent::manufacturer_to_string_(uint16_t manufacturer, char *out) co
   out[1] = static_cast<char>(((manufacturer >> 5) & 0x1F) + 0x40);
   out[2] = static_cast<char>((manufacturer & 0x1F) + 0x40);
   out[3] = '\0';
+}
+
+const LogString *mbus_result_to_str(MBusResult result) {
+  switch (result) {
+    case MBusResult::MBUS_RESULT_OK:
+      return LOG_STR("ok");
+    case MBusResult::MBUS_RESULT_BUSY:
+      return LOG_STR("busy");
+    case MBusResult::MBUS_RESULT_NO_RESPONSE:
+      return LOG_STR("no response");
+    case MBusResult::MBUS_RESULT_INVALID_RESPONSE:
+      return LOG_STR("invalid response");
+    case MBusResult::MBUS_RESULT_INVALID_REQUEST:
+      return LOG_STR("invalid request");
+  }
+  return LOG_STR("unknown");
+}
+
+std::span<const uint8_t> manufacturer_data(std::span<const uint8_t> data) {
+  return data.subspan(records_codec::manufacturer_data_offset(data.data(), data.size()));
 }
 
 const char *mbus_record_function_to_string(uint8_t function) {

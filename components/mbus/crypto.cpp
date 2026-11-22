@@ -79,7 +79,7 @@ bool Aes128CbcDecryptor::decrypt(const uint8_t *iv, const uint8_t *in, uint8_t *
   return mbedtls_aes_crypt_cbc(&this->context_, MBEDTLS_AES_DECRYPT, length, iv_copy, in, out) == 0;
 }
 
-#else  // MBUS_AES_BEARSSL
+#elif defined(MBUS_AES_BEARSSL)
 
 bool Aes128CbcDecryptor::set_key(const uint8_t *key) {
   br_aes_ct_cbcdec_init(&this->context_, key, KEY_SIZE);
@@ -98,6 +98,12 @@ bool Aes128CbcDecryptor::decrypt(const uint8_t *iv, const uint8_t *in, uint8_t *
   br_aes_ct_cbcdec_run(&this->context_, iv_copy, out, length);
   return true;
 }
+
+#else  // MBUS_AES_NONE
+
+bool Aes128CbcDecryptor::set_key(const uint8_t *key) { return false; }
+
+bool Aes128CbcDecryptor::decrypt(const uint8_t *iv, const uint8_t *in, uint8_t *out, size_t length) { return false; }
 
 #endif
 

@@ -8,6 +8,7 @@ namespace esphome::mbus {
 
 ESPHOME_LOG_TAG(TAG, "mbus");
 
+// First block of the link layer: L, C, M (2 bytes) and A (6 bytes) (EN 13757-4:2019, Tables 27 and 30)
 static constexpr size_t MBUS_DLL_HEADER_LENGTH = 10;
 
 void MBusComponent::parse_c_mode_(const std::vector<uint8_t> &packet, const MBusReceiveMeta &meta) {

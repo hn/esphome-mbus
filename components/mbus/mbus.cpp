@@ -58,12 +58,21 @@ void MBusComponent::dump_config() {
 #ifdef USE_MBUS_WIRED_UART
   if (this->parent_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Source: Wired UART");
-    ESP_LOGCONFIG(TAG, "  Update interval: %ums", static_cast<unsigned>(this->wired_update_interval_));
+    LOG_UPDATE_INTERVAL(this);
+    ESP_LOGCONFIG(TAG, "  Max telegrams: %u", this->wired_max_telegrams_);
+    if (this->wired_wakeup_enabled_) {
+      ESP_LOGCONFIG(TAG, "  Wake-up after idle: %ums", static_cast<unsigned>(this->wired_wakeup_after_idle_));
+    }
   }
 #endif
   if (this->has_meter_id_) {
     ESP_LOGCONFIG(TAG, "  Meter ID: 0x%08X", static_cast<unsigned>(this->meter_id_));
   }
+#ifdef USE_MBUS_WIRED_UART
+  if (this->parent_ != nullptr && !this->has_secondary_address_) {
+    ESP_LOGCONFIG(TAG, "  Primary address: %u", this->wired_address_);
+  }
+#endif
   if (this->has_secondary_address_) {
     ESP_LOGCONFIG(TAG, "  Secondary address: 0x%016llX", static_cast<unsigned long long>(this->secondary_address_));
   }
@@ -108,6 +117,14 @@ void MBusComponent::enqueue_packet_(const std::vector<uint8_t> &packet, const MB
     this->pending_packets_.pop_front();
   }
   this->pending_packets_.push_back(PendingRadioPacket{packet, meta});
+}
+
+void MBusComponent::update() {
+#ifdef USE_MBUS_WIRED_UART
+  if (this->parent_ != nullptr) {
+    this->start_wired_readout_();
+  }
+#endif
 }
 
 void MBusComponent::loop() {

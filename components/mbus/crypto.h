@@ -19,6 +19,9 @@
 #elif __has_include(<bearssl/bearssl.h>)
 #include <bearssl/bearssl.h>
 #define MBUS_AES_BEARSSL
+#elif defined(USE_HOST)
+// The host platform has no AES library; encryption_key is refused at config validation
+#define MBUS_AES_NONE
 #else
 #error "The platform doesn't provide a compatible AES library for mbus"
 #endif
@@ -42,7 +45,7 @@ class Aes128CbcDecryptor {
   mbedtls_svc_key_id_t key_id_{};
 #elif defined(MBUS_AES_MBEDTLS)
   mbedtls_aes_context context_{};
-#else
+#elif defined(MBUS_AES_BEARSSL)
   br_aes_ct_cbcdec_keys context_{};
 #endif
   bool has_key_{false};

@@ -6,9 +6,14 @@ component core, with a full DIF/VIF/VIFE record dump instead of built-in per-met
 
 > [!NOTE]
 > **Project Status:** Early stage. Wireless C1 Format A is hardware-validated against a real WaterStarM
-> water meter, over CC1101, SX126x, and SX127x. Everything else (C1 Format B, T1, wired UART) is
-> implemented but not yet validated against real hardware — see
+> water meter, over CC1101, SX126x, and SX127x; wired M-Bus is validated over the same meter's optical
+> (infrared) interface. Everything else (C1 Format B, T1, the two-wire bus) is implemented but not yet
+> validated against real hardware — see
 > [Supported Transports](#supported-transports--validation-status) below.
+
+> [!TIP]
+> **Help wanted:** I only have a few meters to test with. If you try this with your M-Bus hardware, please
+> open an issue and tell me how it went — whether it worked or not.
 
 Please do me a favor: :thumbsup: If you use any information or code you find here, please link back to this page.
 :star: Also, please consider to star this project. I really like to keep track of who is using this to do creative things, especially if you are from other parts of the world.
@@ -39,7 +44,7 @@ Other (w)M-Bus options exist for ESPHome; this one is built around a few specifi
 
 ```
 wireless (CC1101 / SX126x / SX127x)  \
-wired UART                            >--  normalized frame  -->  application layer  -->  records  -->  entities
+wired UART (two-wire / infrared)      >--  normalized frame  -->  application layer  -->  records  -->  entities
 (TCP, conceptual only)               /
 ```
 
@@ -68,7 +73,8 @@ cap.
 
 | Transport | Implemented | Validated against real hardware |
 |---|---|---|
-| Wired M-Bus over UART | Yes | No |
+| Wired M-Bus over UART, optical (infrared) interface | Yes | Yes — WaterStarM water meter, primary address |
+| Wired M-Bus over UART, two-wire bus with a transceiver | Yes | No — simulated meter only |
 | TCP (M-Bus/wM-Bus gateway) | No, conceptual only, not committed to | — |
 
 ## Bundled radio component patches
@@ -152,8 +158,9 @@ Instead of `radio_cc1101_id`, you can use `radio_sx126x_id` or `radio_sx127x_id`
 ### Wired M-Bus Example
 
 Wired M-Bus over UART works the same way, just with a different source and no radio-specific settings.
-`secondary_address` is the meter's M-Bus secondary address; `update_interval` controls how often it's
-polled (defaults to `60s`):
+The meter is addressed either by `secondary_address` or by `primary_address` (`0`-`250`, or `254` if it
+is the only meter on the bus); `update_interval` controls how often it's polled (defaults to `60s`). The
+UART has to be set to 8 data bits, even parity and 1 stop bit:
 
 ```yaml
 uart:
@@ -171,10 +178,40 @@ mbus:
     dump_records: true
 ```
 
-Wired M-Bus needs an external M-Bus master transceiver between the ESP32's UART pins and the physical
+Wired M-Bus needs an external M-Bus master transceiver between the UART pins and the physical
 two-wire bus — it supplies the bus's 24-36V power and converts between the bus's current-loop modulation
 and standard UART logic levels. `esphome-mbus` only speaks the resulting byte stream on top of that; it
 doesn't provide or replace the transceiver itself.
+
+### Infrared M-Bus Example
+
+Many meters also speak M-Bus over their optical interface. That is the wired protocol over an infrared
+LED and a photodiode on the UART pins (again 8 data bits, even parity, 1 stop bit), plus a wake-up before
+the first datagram:
+
+```yaml
+mbus:
+  - id: water_meter
+    wired_uart_id: ir_uart
+    primary_address: 254
+    # Optical readouts cost the meter battery, and some meters limit them per day
+    update_interval: 24h
+    # The optical interface sleeps to save battery: after this long without traffic, the next request
+    # starts with a wake-up sequence (2.2 s of 0x55). Needs ESP32 or ESP8266.
+    wakeup_after_idle: 10s
+    dump_records: true
+```
+
+`sensor:`/`binary_sensor:`/`text_sensor:` entries work as with any other source. To read the meter on
+demand instead, set `update_interval: never` and use the `mbus.request_ud2` action:
+
+```yaml
+button:
+  - platform: template
+    name: "Read meter"
+    on_press:
+      - mbus.request_ud2: water_meter
+```
 
 ### Complete Examples: WaterStarM Water Meter
 
@@ -282,8 +319,11 @@ binary_sensor:
 - SX126x is hardware-capped at 255 bytes on the air interface — enough for most C1 telegrams, but not
   necessarily for longer ones or T1 (3-of-6 encoding inflates the on-air size). This is a hardware limit,
   not a missing patch — there's no workaround.
-- Wired UART is implemented but frozen pending real hardware logs; response control field, status bits
-  and non-zero signature handling still need hardening before first hardware use.
+- Wired M-Bus is only hardware-validated over the optical interface of one meter. Addressing by
+  `secondary_address`, several meters on one bus and multi-telegram readouts have only run against a
+  simulated meter so far.
+- Wired M-Bus decodes the variable data structure only; encrypted data and the fixed data structure
+  aren't supported there, and there is no search for unknown meters on the bus.
 - TCP transport is only a conceptual placeholder in the architecture; it's not committed to being
   implemented, by the maintainer or anyone else.
 

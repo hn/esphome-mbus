@@ -98,9 +98,11 @@ static void log_special_record(uint8_t dif, size_t pos, const char *data_type, c
            data_type, raw, data_type);
 }
 
-template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_t> &payload, F &&callback) const {
+template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_t> &payload, F &&callback) {
   size_t pos = 0;
   while (pos < payload.size()) {
+    // Special DIFs: 2Fh idle filler, 0Fh manufacturer specific data, 1Fh the same with more records in the next
+    // datagram (EN 13757-3:2018, Table 6)
     while (pos < payload.size() && payload[pos] == 0x2F) {
       pos++;
     }
@@ -117,6 +119,7 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
       return;
     }
     if (dif == 0x1F) {
+      this->more_records_follow_ = true;
       if (this->dump_records_enabled_) {
         log_special_record(dif, record_pos, "more_records_follow", payload.data() + pos, payload.size() - pos);
       }
@@ -365,12 +368,20 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
   }
 }
 
-void MBusComponent::dump_records_(const std::vector<uint8_t> &payload) const {
+void MBusComponent::dump_records_(const std::vector<uint8_t> &payload) {
   this->parse_records_(payload, [](const MBusRecord &record) { log_record(record); });
 }
 
-void MBusComponent::process_records_(const std::vector<uint8_t> &payload) const {
-  if (!this->dump_records_enabled_ && this->record_listeners_.empty()) {
+void MBusComponent::process_records_(const std::vector<uint8_t> &payload) {
+#ifdef USE_MBUS_WIRED_UART
+  // The answer to a command is manufacturer specific as a rule and belongs to the caller of send_ud() only
+  if (this->wired_operation_ == MBusWiredOperation::MBUS_WIRED_OPERATION_SEND_UD) {
+    ESP_LOGD(TAG, "Command answer: %u bytes, not parsed as records", static_cast<unsigned>(payload.size()));
+    return;
+  }
+#endif
+  // A wired readout has to find DIF 1Fh even if nobody listens to the records
+  if (!this->dump_records_enabled_ && this->record_listeners_.empty() && !this->is_wired_()) {
     return;
   }
   this->parse_records_(payload, [this](const MBusRecord &record) {

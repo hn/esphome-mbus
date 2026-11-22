@@ -7,10 +7,14 @@
 
 namespace esphome::mbus::wmbus_frame_codec {
 
+// CRC of the link layer blocks: x^16 + x^13 + x^12 + x^11 + x^10 + x^8 + x^6 + x^5 + x^2 + 1, initial value 0,
+// final CRC complemented (EN 13757-4:2019, 12.5.7)
 static constexpr uint16_t WMBUS_CRC_POLY = 0x3D65;
 
-// First byte of a mode C over-the-air packet; anything else is treated as mode T (no such fixed prefix,
-// already 3-of-6 encoded from the first byte).
+// Last 16 chips of the mode C synchronization pattern, which a receiver synchronizing on the part in front of
+// them delivers as the first two bytes: 54h, then CDh for frame format A or 3Dh for frame format B
+// (EN 13757-4:2019, 9.4.2). Anything else is treated as mode T, which has no such prefix and is "3 out of 6"
+// encoded from its first byte (7.4.2).
 static constexpr uint8_t WMBUS_MODE_C_PREFIX = 0x54;
 static constexpr uint8_t WMBUS_FRAME_A_PREFIX = 0xCD;
 static constexpr uint8_t WMBUS_FRAME_B_PREFIX = 0x3D;
@@ -31,6 +35,8 @@ inline uint16_t crc16_en13757(const uint8_t *data, size_t length) {
   return ~crc;
 }
 
+// Frame format B: the L field counts all bytes behind it including the CRCs; frames of up to 128 bytes have
+// one CRC, longer ones a second CRC over the optional block (EN 13757-4:2019, 12.4, Tables 30 to 32, 12.5.3)
 inline size_t packet_len_frame_b(uint8_t l_field) {
   if (l_field < 12) {
     return 0;
@@ -44,6 +50,8 @@ inline size_t packet_len_frame_b(uint8_t l_field) {
   return 128;
 }
 
+// Frame format A: the L field does not count the CRCs. The first block has 10 bytes, the others 16, the last
+// one what is left; each is followed by a CRC (EN 13757-4:2019, 12.3, Tables 27 to 29, 12.5.3)
 inline size_t packet_len_frame_a(uint8_t l_field) {
   if (l_field <= 9) {
     return 0;
@@ -139,6 +147,7 @@ inline bool strip_frame_b_crcs(const uint8_t *data, size_t length, std::vector<u
   return true;
 }
 
+// "3 out of 6" code of mode T: 6 chips per nibble (EN 13757-4:2019, 7.4.2, Table 10)
 inline int decode_3of6_nibble(uint8_t code) {
   switch (code) {
     case 0b010110:
