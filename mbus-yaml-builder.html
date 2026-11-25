@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-Bus YAML Builder</title>
+<style>
+  :root {
+    --bg: #f4f4f9; --card: #ffffff; --text: #22252b; --muted: #6b7280; --line: #dcdfe6;
+    --accent: #1f6feb; --ok: #1a7f37; --warn: #9a6700; --warn-bg: #fff8c5; --code-bg: #f0f2f6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px; line-height: 1.45;
+  }
+  main { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 0 0 10px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  textarea, pre, code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  textarea#logInput { width: 100%; height: 170px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; resize: vertical; }
+  textarea#logInput.drag { border-color: var(--accent); background: #eef4ff; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 10px; }
+  .row label { color: var(--muted); }
+  input[type=text] { padding: 5px 8px; border: 1px solid var(--line); border-radius: 5px; font-size: 14px; }
+  button { padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; font-size: 14px; cursor: pointer; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.right { margin-left: auto; }
+  .meter-opts { margin: 0 0 10px; color: var(--muted); font-size: 14px; }
+  #status { margin-top: 10px; color: var(--muted); }
+  #status.ok { color: var(--ok); }
+  #status.warn { color: var(--warn); }
+  .meter-head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; margin-bottom: 8px; }
+  .meter-head .links { margin-left: auto; font-size: 13px; }
+  .meter-head a { color: var(--accent); cursor: pointer; text-decoration: none; margin-left: 10px; }
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; white-space: nowrap; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
+  td.name input { width: 230px; }
+  td.value { font-weight: 600; }
+  td.detail { color: var(--muted); font-size: 12px; }
+  tr.off td.value, tr.off td.name input { color: var(--muted); font-weight: normal; }
+  tr.unusable td { color: var(--muted); }
+  tr.bit td { background: #fafbfc; }
+  tr.bit td:first-child { padding-left: 26px; }
+  .tag { display: inline-block; padding: 0 6px; border-radius: 10px; background: var(--code-bg); color: var(--muted); font-size: 12px; }
+  pre#yamlOut { margin: 0; padding: 12px; background: var(--code-bg); border-radius: 6px; overflow-x: auto; min-height: 60px; white-space: pre; }
+  .notes { margin: 10px 0 0; padding: 8px 12px 8px 28px; background: var(--warn-bg); border-radius: 6px; color: var(--warn); font-size: 13px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  footer { color: var(--muted); font-size: 13px; text-align: center; margin-top: 24px; }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>M-Bus YAML Builder</h1>
+  <p class="sub">Turns the record dump of the ESPHome <code>mbus</code> component into <code>sensor:</code>,
+    <code>binary_sensor:</code> and <code>text_sensor:</code> entries. Everything runs in your browser, nothing is uploaded.</p>
+
+  <div class="card">
+    <h2>1. Paste your log</h2>
+    <textarea id="logInput" spellcheck="false"
+      placeholder="Set dump_records: true, then paste the ESPHome log here (or drop a log file). The whole log is fine, only the Record: lines are used."></textarea>
+    <div class="row">
+      <input type="file" id="fileInput" accept=".log,.txt,text/plain">
+      <button id="exampleBtn" type="button" class="right">Load an example</button>
+      <button id="clearBtn" type="button">Clear</button>
+    </div>
+    <div id="status">No log yet.</div>
+  </div>
+
+  <div id="meters"></div>
+
+  <div class="card" id="outCard" hidden>
+    <h2>3. Copy the YAML</h2>
+    <pre id="yamlOut"></pre>
+    <div class="row">
+      <button id="copyBtn" type="button">Copy to clipboard</button>
+      <span id="copyMsg" class="hint"></span>
+    </div>
+    <ul class="notes" id="notes" hidden></ul>
+    <p class="hint">Check units, scaling filters, device classes and names before use: they are suggestions derived
+      from the dump.</p>
+  </div>
+
+  <footer>Part of <a href="https://github.com/hn/esphome-mbus">esphome-mbus</a></footer>
+</main>
+
+<script>
+"use strict";
+// ===== core (no DOM access; also loaded by the tests) =====
+
+const MEDIUM_NAMES = {
+  0x00: "other", 0x01: "oil", 0x02: "electricity", 0x03: "gas", 0x04: "heat", 0x05: "steam", 0x06: "warm water",
+  0x07: "water", 0x08: "heat cost allocator", 0x09: "compressed air", 0x0A: "cooling", 0x0B: "cooling",
+  0x0C: "heat", 0x0D: "heat/cooling", 0x0E: "bus/system", 0x15: "hot water", 0x16: "cold water",
+  0x17: "dual water", 0x18: "pressure", 0x19: "A/D converter", 0x1A: "smoke detector", 0x1B: "room sensor",
+  0x1C: "gas detector", 0x20: "breaker", 0x21: "valve", 0x25: "customer unit", 0x28: "waste water",
+  0x29: "garbage", 0x36: "radio converter", 0x37: "radio converter",
+};
+const WATER_MEDIA = new Set([0x06, 0x07, 0x15, 0x16, 0x17, 0x28]);
+const GAS_MEDIA = new Set([0x03]);
+
+// What Home Assistant should know about a unit of the dump. counter: a meter reading rather than a momentary value.
+const UNIT_INFO = {
+  "Wh": { unit: "Wh", deviceClass: "energy", counter: true, name: "Energy" },
+  "J": { unit: "J", deviceClass: "energy", counter: true, name: "Energy" },
+  "m3": { unit: "m³", deviceClass: "volume", counter: true, name: "Volume" },
+  "kg": { unit: "kg", deviceClass: null, counter: true, name: "Mass" },
+  "s": { unit: "s", deviceClass: "duration", counter: false, name: "Duration" },
+  "W": { unit: "W", deviceClass: "power", counter: false, name: "Power" },
+  "J/h": { unit: "J/h", deviceClass: null, counter: false, name: "Power" },
+  "m3/h": { unit: "m³/h", deviceClass: "volume_flow_rate", counter: false, name: "Volume flow" },
+  "m3/min": { unit: "m³/min", deviceClass: "volume_flow_rate", counter: false, name: "Volume flow" },
+  "m3/s": { unit: "m³/s", deviceClass: "volume_flow_rate", counter: false, name: "Volume flow" },
+  "kg/h": { unit: "kg/h", deviceClass: null, counter: false, name: "Mass flow" },
+  "degC": { unit: "°C", deviceClass: "temperature", counter: false, name: "Temperature" },
+  "K": { unit: "K", deviceClass: null, counter: false, name: "Temperature difference" },
+  "bar": { unit: "bar", deviceClass: "pressure", counter: false, name: "Pressure" },
+  "hca": { unit: "HCA", deviceClass: null, counter: true, name: "Heat cost allocation" },
+  "V": { unit: "V", deviceClass: "voltage", counter: false, name: "Voltage" },
+};
+
+// Names for primary VIF ranges where the unit alone does not tell what the value is
+function primaryVifName(vif) {
+  if (vif >= 0x20 && vif <= 0x23) return "On time";
+  if (vif >= 0x24 && vif <= 0x27) return "Operating time";
+  if (vif >= 0x58 && vif <= 0x5B) return "Flow temperature";
+  if (vif >= 0x5C && vif <= 0x5F) return "Return temperature";
+  if (vif >= 0x64 && vif <= 0x67) return "External temperature";
+  if (vif >= 0x70 && vif <= 0x73) return "Averaging duration";
+  if (vif >= 0x74 && vif <= 0x77) return "Actuality duration";
+  if (vif === 0x6C) return "Date";
+  if (vif === 0x6D) return "Date and time";
+  if (vif === 0x78) return "Fabrication number";
+  if (vif === 0x79) return "Identification";
+  if (vif === 0x7A) return "Bus address";
+  return null;
+}
+
+// Names for codes behind the extension VIF FDh, as far as they are common
+const VIF_EXT_NAMES = {
+  0x7D08: "Access number", 0x7D09: "Medium", 0x7D0A: "Manufacturer", 0x7D0B: "Parameter set", 0x7D0C: "Model",
+  0x7D0D: "Hardware version", 0x7D0E: "Firmware version", 0x7D0F: "Software version", 0x7D10: "Customer location",
+  0x7D11: "Customer", 0x7D17: "Error flags", 0x7D18: "Error mask", 0x7D1A: "Digital output", 0x7D1B: "Digital input",
+  0x7D1C: "Baud rate", 0x7D20: "First storage number", 0x7D21: "Last storage number", 0x7D22: "Storage block size",
+  0x7D3A: "Dimensionless value", 0x7D60: "Reset counter", 0x7D61: "Cumulation counter", 0x7D6C: "Operator specific data",
+  0x7D6E: "Time point second", 0x7D70: "Date and time of battery change", 0x7D74: "Remaining battery life",
+};
+
+const FUNCTION_SUFFIX = { maximum: "maximum", minimum: "minimum", value_during_error: "during error" };
+const FLAG_SUFFIX = {
+  backward_flow: "backward", forward_flow: "forward", per_second: "per second", per_minute: "per minute",
+  per_hour: "per hour", per_day: "per day", per_week: "per week", per_month: "per month", per_year: "per year",
+  start_date: "start", end_date: "end", duration_of: "duration", datetime_of: "date and time",
+};
+
+function parseNumber(text) {
+  if (text === undefined || text === null || text === "") return null;
+  const value = Number(text);
+  return Number.isFinite(value) ? value : null;
+}
+
+function parseHexList(text) {
+  if (!text) return [];
+  const result = [];
+  for (const item of text.replace(/[\[\]]/g, "").split(",")) {
+    const trimmed = item.trim();
+    if (trimmed === "") continue;
+    const value = Number(trimmed);
+    if (Number.isFinite(value)) result.push(value);
+  }
+  return result;
+}
+
+// One "Record: ..." line of the dump, with whatever a log viewer put in front of or behind it
+function parseRecordLine(body) {
+  const semicolon = body.indexOf("; decoded:");
+  const head = semicolon >= 0 ? body.slice(0, semicolon) : body;
+  const tail = semicolon >= 0 ? body.slice(semicolon + "; decoded:".length).trim() : "";
+  const fields = {};
+  const pattern = /([a-z_]+)=(\[[^\]]*\]|\S*)/g;
+  let match;
+  while ((match = pattern.exec(head)) !== null) {
+    if (!(match[1] in fields)) fields[match[1]] = match[2];
+  }
+  const dif = parseNumber(fields.dif);
+  // A line that was cut off before its data type is not used: its last field may be cut as well
+  if (dif === null || fields.data_type === undefined || fields.raw === undefined) return null;
+  const record = {
+    dif: dif, vif: parseNumber(fields.vif), vifExt: parseNumber(fields.vif_ext),
+    storage: fields.storage !== undefined ? fields.storage : null,
+    tariff: parseNumber(fields.tariff), subunit: parseNumber(fields.subunit),
+    func: fields.function || null, vife: parseHexList(fields.vife), dataType: fields.data_type || "",
+    raw: fields.raw || "", flags: fields.flags ? fields.flags.split(",").filter(Boolean) : [],
+    rawValue: fields.raw_value !== undefined ? fields.raw_value : null,
+    scale: null, unit: null, value: null, text: null,
+  };
+  if (tail !== "") {
+    const scale = /(?:^|\s)scale=(\S+)/.exec(tail);
+    if (scale) {
+      record.scale = parseNumber(scale[1]);
+      const unit = /(?:^|\s)unit=(\S*)/.exec(tail);
+      const value = /(?:^|\s)value=(\S+)/.exec(tail);
+      if (unit && value) {
+        record.unit = unit[1];
+        record.value = value[1];
+      } else {
+        // Cut off within the decoded part: the scale may be incomplete, so it is not used
+        record.scale = null;
+        record.cut = true;
+      }
+    } else {
+      const value = /(?:^|\s)value=(.*)$/.exec(tail);
+      if (value) record.text = value[1].trim();
+    }
+  }
+  return record;
+}
+
+function recordKey(record) {
+  return [record.dif, record.vif, record.vifExt, record.storage, record.tariff, record.subunit, record.vife.join("."),
+          record.dataType === "" ? "" : (record.vif === null ? record.dataType : "")].join("|");
+}
+
+// kind decides which platform a record can become
+function recordKind(record) {
+  if (record.vif === null) return "none";
+  if (record.unit === "flags" && record.rawValue !== null) return "flags";
+  if (record.rawValue !== null || (record.scale !== null && record.value !== null)) return "number";
+  if (record.text !== null && record.text !== "") {
+    return /^datetime_type/.test(record.dataType) ? "timestamp" : "text";
+  }
+  return "none";
+}
+
+function newMeter(id) {
+  return { id: id, manufacturer: null, version: null, devType: null, records: new Map(), datagrams: 0 };
+}
+
+// Reads a whole log. Tolerates colour codes, timestamps, other components' lines, CR LF and truncated lines.
+function parseLog(text) {
+  const result = { meters: new Map(), lines: 0, recordLines: 0, unreadable: 0 };
+  let current = null;
+  let inDatagram = false;
+  const meterFor = (id) => {
+    if (!result.meters.has(id)) result.meters.set(id, newMeter(id));
+    return result.meters.get(id);
+  };
+  const clean = text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").replace(/\[[0-9;]*m(?=\[|$)/gm, "");
+  for (const line of clean.split(/\r\n|\r|\n/)) {
+    result.lines++;
+    const recordAt = line.indexOf("Record: ");
+    if (recordAt >= 0) {
+      result.recordLines++;
+      const record = parseRecordLine(line.slice(recordAt + "Record: ".length));
+      if (record === null) {
+        result.unreadable++;
+        continue;
+      }
+      if (current === null) current = meterFor("unknown");
+      if (!inDatagram) {
+        current.datagrams++;
+        inDatagram = true;
+      }
+      const key = recordKey(record);
+      const known = current.records.get(key);
+      if (known) {
+        record.seen = known.seen + 1;
+        record.order = known.order;
+      } else {
+        record.seen = 1;
+        record.order = current.records.size;
+      }
+      current.records.set(key, record);
+      continue;
+    }
+    // The link layer line of a radio datagram and the long header both name the meter
+    const identity = /\b(?:Link|Header): .*?\bID=0x([0-9A-Fa-f]{8})\b/.exec(line);
+    if (identity) {
+      current = meterFor(identity[1].toUpperCase());
+      inDatagram = false;
+      const manufacturer = /\bM=(\S+)/.exec(line);
+      const version = /\bVersion=(0x[0-9A-Fa-f]+)/.exec(line);
+      const devType = /\bDevType=(0x[0-9A-Fa-f]+)/.exec(line);
+      if (manufacturer) current.manufacturer = manufacturer[1];
+      if (version) current.version = Number(version[1]);
+      if (devType) current.devType = Number(devType[1]);
+      continue;
+    }
+    if (/\bHeader: CI=/.test(line) || /Received mode [CT] /.test(line)) inDatagram = false;
+  }
+  // A meter that only ever appeared in a header line is of no use here
+  for (const [id, meter] of result.meters) {
+    if (meter.records.size === 0) result.meters.delete(id);
+  }
+  return result;
+}
+
+function hex(value, digits) {
+  return "0x" + value.toString(16).toUpperCase().padStart(digits, "0");
+}
+
+function sortedRecords(meter) {
+  return Array.from(meter.records.values()).sort((a, b) => a.order - b.order);
+}
+
+function suggestName(record, meter) {
+  const kind = recordKind(record);
+  let name = null;
+  if (record.vifExt !== null) name = VIF_EXT_NAMES[record.vifExt] || null;
+  if (name === null && record.vif !== null && record.vifExt === null) name = primaryVifName(record.vif);
+  if (name === null && record.unit && UNIT_INFO[record.unit]) name = UNIT_INFO[record.unit].name;
+  if (name === null && kind === "flags") name = "Status flags";
+  if (name === null) {
+    name = record.vifExt !== null ? "Value " + hex(record.vifExt, 4) : "Value " + hex(record.vif === null ? 0 : record.vif, 2);
+  }
+  const parts = [];
+  for (const flag of record.flags) {
+    if (FLAG_SUFFIX[flag]) parts.push(FLAG_SUFFIX[flag]);
+  }
+  if (record.func && FUNCTION_SUFFIX[record.func]) parts.push(FUNCTION_SUFFIX[record.func]);
+  if (record.tariff) parts.push("tariff " + record.tariff);
+  if (record.subunit) parts.push("subunit " + record.subunit);
+  if (record.storage !== null && record.storage !== "0") parts.push("storage " + record.storage);
+  return parts.length ? name + " (" + parts.join(", ") + ")" : name;
+}
+
+// Records worth a tick by default: current values with a physical unit, and the meter's clock
+function selectedByDefault(record) {
+  const kind = recordKind(record);
+  const current = (record.storage === "0" || record.storage === null) && !record.tariff && !record.subunit &&
+                  (record.func === null || record.func === "instantaneous") && record.flags.length === 0;
+  if (!current) return false;
+  if (kind === "timestamp") return true;
+  return kind === "number" && !!record.unit && !!UNIT_INFO[record.unit];
+}
+
+function displayValue(record) {
+  const kind = recordKind(record);
+  if (kind === "flags") {
+    const bits = BigInt(record.rawValue);
+    return hex(Number(bits & 0xFFFFFFFFn), Math.max(2, (record.raw.split(".").length) * 2)) + " (flags)";
+  }
+  if (kind === "number") {
+    if (record.value !== null && record.scale !== null) {
+      const info = UNIT_INFO[record.unit];
+      return record.value + (info ? " " + info.unit : (record.unit ? " " + record.unit : ""));
+    }
+    return String(record.rawValue);
+  }
+  if (kind === "timestamp" || kind === "text") return record.text;
+  return record.dataType || "";
+}
+
+function bitCount(record) {
+  const bytes = record.raw ? record.raw.split(".").filter(Boolean).length : 0;
+  return Math.min(64, Math.max(8, bytes * 8));
+}
+
+function bitIsSet(record, bit) {
+  try {
+    return ((BigInt(record.rawValue) >> BigInt(bit)) & 1n) === 1n;
+  } catch (e) {
+    return false;
+  }
+}
+
+// The matcher fields a record needs so that no other record of the meter matches as well. dif and vif are
+// always given, vif_ext whenever the record has one; the others only as far as they tell records apart.
+function matcherFor(record, meter) {
+  const used = { storage: false, tariff: false, subunit: false, vife: false };
+  const matches = (other) => {
+    if (other === record || other.vif === null) return false;
+    if (other.dif !== record.dif || other.vif !== record.vif) return false;
+    if (record.vifExt !== null && other.vifExt !== record.vifExt) return false;
+    if (used.storage && other.storage !== record.storage) return false;
+    if (used.tariff && other.tariff !== record.tariff) return false;
+    if (used.subunit && other.subunit !== record.subunit) return false;
+    if (used.vife && other.vife.join(".") !== record.vife.join(".")) return false;
+    return true;
+  };
+  const others = Array.from(meter.records.values());
+  let colliding = others.filter(matches);
+  for (const field of ["storage", "tariff", "subunit", "vife"]) {
+    if (colliding.length === 0) break;
+    // storage is a 32 bit value in the YAML schema
+    if (field === "storage" && (record.storage === null || Number(record.storage) > 0xFFFFFFFF)) continue;
+    used[field] = true;
+    const fewer = others.filter(matches);
+    if (fewer.length < colliding.length) {
+      colliding = fewer;
+    } else {
+      used[field] = false;
+    }
+  }
+  return { used: used, ambiguous: colliding.length > 0 };
+}
+
+function decimalsOf(scale) {
+  if (scale === null || scale >= 1) return 0;
+  return Math.min(9, Math.max(0, Math.ceil(-Math.log10(scale) - 1e-9)));
+}
+
+function yamlString(text) {
+  return '"' + String(text).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+}
+
+function matcherLines(record, meter, notes, name) {
+  const lines = ["    dif: " + hex(record.dif, 2), "    vif: " + hex(record.vif, 2)];
+  if (record.vifExt !== null) lines.push("    vif_ext: " + hex(record.vifExt, 4));
+  const matcher = matcherFor(record, meter);
+  if (matcher.used.storage) lines.push("    storage: " + record.storage);
+  if (matcher.used.tariff) lines.push("    tariff: " + record.tariff);
+  if (matcher.used.subunit) lines.push("    subunit: " + record.subunit);
+  if (matcher.used.vife) lines.push("    vife: [" + record.vife.map((v) => hex(v, 2)).join(", ") + "]");
+  if (matcher.ambiguous) {
+    notes.push(yamlString(name) + " cannot be told apart from another record of the meter by the matcher fields; " +
+               "both will publish to this entity.");
+  }
+  return lines;
+}
+
+function sensorDeviceClass(record, meter, info) {
+  if (info.deviceClass !== "volume") return info.deviceClass;
+  if (meter.devType !== null && WATER_MEDIA.has(meter.devType)) return "water";
+  if (meter.devType !== null && GAS_MEDIA.has(meter.devType)) return "gas";
+  return "volume";
+}
+
+// selection: Map of record key -> { on: bool, name: string, bits: Map of bit -> { on, name } }
+function buildYaml(parsed, selection, options) {
+  const notes = [];
+  const sensors = [];
+  const binarySensors = [];
+  const textSensors = [];
+  for (const meter of parsed.meters.values()) {
+    // options.mbusIds: Map of meter id -> mbus_id; options.mbusId: one for all meters
+    let mbusId = options && options.mbusIds && options.mbusIds.get(meter.id) ? options.mbusIds.get(meter.id) : "";
+    if (mbusId === "" && options && options.mbusId) mbusId = options.mbusId;
+    mbusId = mbusId.trim();
+    const head = (platform, name) => {
+      const lines = ["  - platform: mbus"];
+      if (mbusId !== "") lines.push("    mbus_id: " + mbusId);
+      lines.push("    name: " + yamlString(name));
+      return lines;
+    };
+    for (const record of sortedRecords(meter)) {
+      const state = selection.get(meter.id + "#" + recordKey(record));
+      if (!state) continue;
+      const kind = recordKind(record);
+      if (kind === "flags") {
+        for (const [bit, bitState] of state.bits) {
+          if (!bitState.on) continue;
+          const name = bitState.name || (state.name + " bit " + bit);
+          const lines = head("binary_sensor", name).concat(matcherLines(record, meter, notes, name));
+          lines.push("    bit: " + bit);
+          binarySensors.push(lines.join("\n"));
+        }
+        continue;
+      }
+      if (!state.on || kind === "none") continue;
+      const name = state.name || suggestName(record, meter);
+      if (kind === "text") {
+        textSensors.push(head("text_sensor", name).concat(matcherLines(record, meter, notes, name)).join("\n"));
+        continue;
+      }
+      const lines = head("sensor", name).concat(matcherLines(record, meter, notes, name));
+      if (kind === "timestamp") {
+        lines.push("    device_class: timestamp");
+        sensors.push(lines.join("\n"));
+        continue;
+      }
+      const info = record.unit ? UNIT_INFO[record.unit] : null;
+      if (record.cut) {
+        notes.push(yamlString(name) + ": its log line was cut off, so unit and scale are missing. Paste a complete line.");
+      }
+      if (info) {
+        lines.push("    unit_of_measurement: " + yamlString(info.unit));
+        const deviceClass = sensorDeviceClass(record, meter, info);
+        if (deviceClass) lines.push("    device_class: " + deviceClass);
+        // A reading kept for a past date does not grow like the current one
+        const current = record.storage === null || record.storage === "0";
+        lines.push("    state_class: " + (info.counter ? (current ? "total_increasing" : "total") : "measurement"));
+      } else if (record.scale !== null) {
+        lines.push("    state_class: measurement");
+      }
+      if (record.dataType === "real32") {
+        lines.push("    accuracy_decimals: 3");
+      } else if (record.scale !== null) {
+        lines.push("    accuracy_decimals: " + decimalsOf(record.scale));
+      }
+      if (record.scale !== null && record.scale !== 1 && record.dataType !== "real32") {
+        lines.push("    filters:", "      - multiply: " + record.scale);
+      }
+      sensors.push(lines.join("\n"));
+    }
+  }
+  const blocks = [];
+  if (sensors.length) blocks.push("sensor:\n" + sensors.join("\n\n"));
+  if (binarySensors.length) blocks.push("binary_sensor:\n" + binarySensors.join("\n\n"));
+  if (textSensors.length) blocks.push("text_sensor:\n" + textSensors.join("\n\n"));
+  return { yaml: blocks.join("\n\n") + (blocks.length ? "\n" : ""), notes: Array.from(new Set(notes)) };
+}
+
+// The state a fresh log starts with
+function defaultSelection(parsed) {
+  const selection = new Map();
+  for (const meter of parsed.meters.values()) {
+    for (const record of meter.records.values()) {
+      const kind = recordKind(record);
+      const state = { on: kind !== "none" && kind !== "flags" && selectedByDefault(record),
+                      name: suggestName(record, meter), bits: new Map() };
+      if (kind === "flags") {
+        for (let bit = 0; bit < bitCount(record); bit++) state.bits.set(bit, { on: false, name: "" });
+      }
+      selection.set(meter.id + "#" + recordKey(record), state);
+    }
+  }
+  return selection;
+}
+
+const EXAMPLE_LOG = [
+  "[09:23:09.087][D][mbus:153]: Link: C=0x44 (SND-NR) M=DWZ ID=0x12345678 Version=0x02 DevType=0x07",
+  "[09:23:09.099][D][mbus:134]: Header: CI=0x7A AccessNr=1 Status=0x00 Config=0x0790 Mode=7 EncryptedBytes=144",
+  "[09:23:09.106][D][mbus:203]: Security: mode 7, MAC ok, decryption ok",
+  "[09:23:09.112][D][mbus:091]: Record: dif=0x04 vif=0x6D storage=0 tariff=0 subunit=0 function=instantaneous pos=2 vif_raw=0x6D dife=[] vife=[] data_type=datetime_type_f raw=18.29.57.3B; decoded: value=2026-11-23T09:24",
+  "[09:23:09.118][D][mbus:091]: Record: dif=0x04 vif=0x13 storage=0 tariff=0 subunit=0 function=instantaneous pos=8 vif_raw=0x13 dife=[] vife=[] data_type=int32 raw=CE.AC.02.00 raw_value=175310; decoded: scale=0.001 unit=m3 value=175.31",
+  "[09:23:09.130][D][mbus:091]: Record: dif=0x42 vif=0x6C storage=1 tariff=0 subunit=0 function=instantaneous pos=19 vif_raw=0x6C dife=[] vife=[] data_type=date_type_g raw=3F.3C; decoded: value=2025-12-31",
+  "[09:23:09.136][D][mbus:091]: Record: dif=0x44 vif=0x13 storage=1 tariff=0 subunit=0 function=instantaneous pos=23 vif_raw=0x13 dife=[] vife=[] data_type=int32 raw=4E.FD.00.00 raw_value=64846; decoded: scale=0.001 unit=m3 value=64.846",
+  "[09:23:09.142][D][mbus:091]: Record: dif=0x44 vif=0x13 storage=1 tariff=0 subunit=0 function=instantaneous pos=29 vif_raw=0x93 dife=[] vife=[0x3C] data_type=int32 raw=11.00.00.00 flags=backward_flow raw_value=17; decoded: scale=0.001 unit=m3 value=0.017",
+].join("\n");
+// ===== end of core =====
+
+// ===== user interface =====
+(function () {
+  if (typeof document === "undefined") return;
+  const input = document.getElementById("logInput");
+  const fileInput = document.getElementById("fileInput");
+  const status = document.getElementById("status");
+  const metersBox = document.getElementById("meters");
+  const outCard = document.getElementById("outCard");
+  const yamlOut = document.getElementById("yamlOut");
+  const notesBox = document.getElementById("notes");
+  let parsed = null;
+  let selection = new Map();
+  // Kept across a new paste, so that a corrected log does not lose what was typed
+  const mbusIds = new Map();
+
+  function element(tag, attributes, children) {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(attributes || {})) {
+      if (key === "class") node.className = value;
+      else if (key === "text") node.textContent = value;
+      else node.setAttribute(key, value);
+    }
+    for (const child of children || []) node.appendChild(child);
+    return node;
+  }
+
+  function renderYaml() {
+    if (!parsed || parsed.meters.size === 0) {
+      outCard.hidden = true;
+      return;
+    }
+    const built = buildYaml(parsed, selection, { mbusIds: mbusIds });
+    outCard.hidden = false;
+    yamlOut.textContent = built.yaml || "# Tick the values you want above.";
+    notesBox.hidden = built.notes.length === 0;
+    notesBox.replaceChildren(...built.notes.map((note) => element("li", { text: note })));
+  }
+
+  function detailText(record) {
+    const parts = ["dif=" + hex(record.dif, 2)];
+    if (record.vif !== null) parts.push("vif=" + hex(record.vif, 2));
+    if (record.vifExt !== null) parts.push("vif_ext=" + hex(record.vifExt, 4));
+    if (record.storage !== null && record.storage !== "0") parts.push("storage=" + record.storage);
+    if (record.tariff) parts.push("tariff=" + record.tariff);
+    if (record.subunit) parts.push("subunit=" + record.subunit);
+    if (record.func && record.func !== "instantaneous") parts.push(record.func);
+    if (record.vife.length) parts.push("vife=[" + record.vife.map((v) => hex(v, 2)).join(",") + "]");
+    if (record.dataType) parts.push(record.dataType);
+    return parts.join(" ");
+  }
+
+  function renderMeter(meter) {
+    const rows = [];
+    const checkboxes = [];
+    for (const record of sortedRecords(meter)) {
+      const kind = recordKind(record);
+      const state = selection.get(meter.id + "#" + recordKey(record));
+      const row = element("tr");
+      const first = element("td");
+      const nameCell = element("td", { class: "name" });
+      if (kind === "none") {
+        row.className = "unusable";
+        nameCell.textContent = record.vif === null ? "(" + (record.dataType || "special") + ")" : state.name;
+      } else {
+        const nameInput = element("input", { type: "text", spellcheck: "false" });
+        nameInput.value = state.name;
+        nameInput.addEventListener("input", () => {
+          state.name = nameInput.value;
+          renderYaml();
+        });
+        nameCell.appendChild(nameInput);
+        if (kind !== "flags") {
+          const box = element("input", { type: "checkbox" });
+          box.checked = state.on;
+          row.className = state.on ? "" : "off";
+          box.addEventListener("change", () => {
+            state.on = box.checked;
+            row.className = state.on ? "" : "off";
+            renderYaml();
+          });
+          checkboxes.push({ box: box, state: state, row: row });
+          first.appendChild(box);
+        }
+      }
+      const platform = { number: "sensor", timestamp: "sensor", text: "text_sensor", flags: "binary_sensor", none: "" }[kind];
+      row.append(first, nameCell, element("td", { class: "value", text: displayValue(record) }),
+                 element("td", {}, platform ? [element("span", { class: "tag", text: platform })] : []),
+                 element("td", { class: "detail mono", text: detailText(record) + (record.seen > 1 ? "  ×" + record.seen : "") }));
+      rows.push(row);
+      if (kind === "flags") {
+        for (const [bit, bitState] of state.bits) {
+          const box = element("input", { type: "checkbox" });
+          box.checked = bitState.on;
+          const bitName = element("input", { type: "text", spellcheck: "false", placeholder: state.name + " bit " + bit });
+          bitName.value = bitState.name;
+          box.addEventListener("change", () => {
+            bitState.on = box.checked;
+            renderYaml();
+          });
+          bitName.addEventListener("input", () => {
+            bitState.name = bitName.value;
+            if (bitName.value !== "" && !box.checked) {
+              box.checked = true;
+              bitState.on = true;
+            }
+            renderYaml();
+          });
+          const bitRow = element("tr", { class: "bit" });
+          bitRow.append(element("td", {}, [box]), element("td", { class: "name" }, [bitName]),
+                        element("td", { class: "value", text: "bit " + bit + ": " + (bitIsSet(record, bit) ? "1" : "0") }),
+                        element("td"), element("td"));
+          rows.push(bitRow);
+        }
+      }
+    }
+    const setAll = (on) => {
+      for (const item of checkboxes) {
+        item.box.checked = on;
+        item.state.on = on;
+        item.row.className = on ? "" : "off";
+      }
+      renderYaml();
+    };
+    const all = element("a", { text: "all" });
+    const none = element("a", { text: "none" });
+    all.addEventListener("click", () => setAll(true));
+    none.addEventListener("click", () => setAll(false));
+    const medium = meter.devType !== null ? (MEDIUM_NAMES[meter.devType] || hex(meter.devType, 2)) : null;
+    const title = meter.id === "unknown" ? "Meter" :
+      "Meter " + meter.id + (meter.manufacturer ? " · " + meter.manufacturer : "") + (medium ? " · " + medium : "");
+    const head = element("div", { class: "meter-head" }, [
+      element("h2", { text: "2. Pick the values · " + title }),
+      element("span", { class: "hint", text: meter.records.size + " records, " + meter.datagrams + " datagram" + (meter.datagrams === 1 ? "" : "s") }),
+      element("span", { class: "links" }, [document.createTextNode("select"), all, none]),
+    ]);
+    const idInput = element("input", { type: "text", size: "18", placeholder: "water_meter", spellcheck: "false" });
+    idInput.value = mbusIds.get(meter.id) || "";
+    idInput.addEventListener("input", () => {
+      mbusIds.set(meter.id, idInput.value);
+      renderYaml();
+    });
+    const options = element("div", { class: "meter-opts" }, [
+      element("label", {}, [document.createTextNode("mbus_id (optional, the id of the meter's mbus: block) "), idInput]),
+    ]);
+    const table = element("table", {}, [
+      element("thead", {}, [element("tr", {}, ["", "Name", "Last value", "Becomes", "Record"].map((t) => element("th", { text: t })))]),
+      element("tbody", {}, rows),
+    ]);
+    return element("div", { class: "card" }, [head, options, element("div", { class: "tablewrap" }, [table])]);
+  }
+
+  function analyse() {
+    const text = input.value;
+    if (text.trim() === "") {
+      parsed = null;
+      status.className = "";
+      status.textContent = "No log yet.";
+      metersBox.replaceChildren();
+      renderYaml();
+      return;
+    }
+    parsed = parseLog(text);
+    selection = defaultSelection(parsed);
+    let records = 0;
+    for (const meter of parsed.meters.values()) records += meter.records.size;
+    if (records === 0) {
+      status.className = "warn";
+      status.textContent = "No \"Record:\" lines found in " + parsed.lines + " lines. Set dump_records: true in the mbus: " +
+        "block, keep the logger at DEBUG level and wait for a datagram of the meter.";
+    } else {
+      status.className = "ok";
+      status.textContent = "Found " + records + " different record" + (records === 1 ? "" : "s") + " in " + parsed.recordLines +
+        " record lines" + (parsed.meters.size > 1 ? " of " + parsed.meters.size + " meters" : "") + "." +
+        (parsed.unreadable ? " " + parsed.unreadable + " truncated line(s) skipped." : "");
+    }
+    metersBox.replaceChildren(...Array.from(parsed.meters.values()).map(renderMeter));
+    renderYaml();
+  }
+
+  let timer = null;
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(analyse, 150);
+  });
+
+  function loadFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      input.value = String(reader.result);
+      analyse();
+    };
+    reader.readAsText(file);
+  }
+  fileInput.addEventListener("change", () => loadFile(fileInput.files[0]));
+  input.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    input.classList.add("drag");
+  });
+  input.addEventListener("dragleave", () => input.classList.remove("drag"));
+  input.addEventListener("drop", (event) => {
+    input.classList.remove("drag");
+    if (event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files.length) {
+      event.preventDefault();
+      loadFile(event.dataTransfer.files[0]);
+    }
+  });
+  document.getElementById("exampleBtn").addEventListener("click", () => {
+    input.value = EXAMPLE_LOG;
+    analyse();
+  });
+  document.getElementById("clearBtn").addEventListener("click", () => {
+    input.value = "";
+    fileInput.value = "";
+    analyse();
+    if (input.focus) input.focus();
+  });
+  document.getElementById("copyBtn").addEventListener("click", () => {
+    const message = document.getElementById("copyMsg");
+    const done = () => {
+      message.textContent = "Copied.";
+      setTimeout(() => { message.textContent = ""; }, 2000);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(yamlOut.textContent).then(done, () => { message.textContent = "Copy failed, select the text instead."; });
+    } else {
+      const range = document.createRange();
+      range.selectNodeContents(yamlOut);
+      const selected = window.getSelection();
+      selected.removeAllRanges();
+      selected.addRange(range);
+      message.textContent = "Selected, press Ctrl+C.";
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -83,6 +83,8 @@ mbus:
     # encryption_key: !secret meter_aes_key  # for encrypted (mode 5 or mode 7) meters
     # compact_frames: true  # optional: read compact frames, needs meter_id on a radio
 
+# The M-Bus YAML Builder creates these entries from your meter's log,
+# see "Building a YAML for Your Meter" below
 sensor:
   - platform: mbus
     mbus_id: water_meter
@@ -234,22 +236,25 @@ into a real device.
 ## Building a YAML for Your Meter
 
 There's no driver database to look your meter up in. Instead, `mbus` can log every record your meter
-sends — the record dump — and you copy the fields of the values you want into your YAML:
+sends — the record dump — and the [M-Bus YAML Builder](https://html-preview.github.io/?url=https://github.com/hn/esphome-mbus/blob/main/mbus-yaml-builder.html)
+turns that log into ready-made entries:
 
 1. **Set `dump_records: true`** and flash. Every record your meter sends gets logged as one `Record:`
-   line at `DEBUG` level, showing everything needed to match it: `dif`, `vif` (and `vif_ext` if the VIF
-   uses an extension), `storage`/`tariff`/`subunit`, `function`, `vife`, plus the raw bytes and the
-   decoded value/unit for context.
-2. **Pick the fields for the value you want** and copy them into a `sensor:`/`binary_sensor:`/
-   `text_sensor:` entry (see [matching rules](#matching-rules) below).
+   line at `DEBUG` level.
+2. **Paste the log into the [M-Bus YAML Builder](https://html-preview.github.io/?url=https://github.com/hn/esphome-mbus/blob/main/mbus-yaml-builder.html)**,
+   tick the values you want and copy the `sensor:`/`binary_sensor:`/`text_sensor:` entries it suggests. The
+   page is a single file that runs in your browser; nothing is uploaded. Alternatively, write the entries
+   by hand from the fields of the `Record:` lines, as shown below.
 3. **Set `dump_records: false`** again once your entities are in place. Formatting and logging every
    record on every received datagram costs CPU on top of the actual decoding; only turn it back on
    temporarily when you're adding a new entity or debugging.
 
 ### Example dump output
 
-Illustrative example, in the shape the real log lines take, for a WaterStarM water meter (manufacturer
-`DWZ`):
+Each `Record:` line shows everything needed to match it: `dif`, `vif` (and `vif_ext` if the VIF uses an
+extension), `storage`/`tariff`/`subunit`, `function`, `vife`, plus the raw bytes and the decoded value/unit
+for context. Illustrative example, in the shape the real log lines take, for a WaterStarM water meter
+(manufacturer `DWZ`):
 
 ```text
 [D][mbus:034]: Received mode C format A frame: bytes=219 expected=219 L=190 rssi=-67 lqi=0 freq_offset=-3174, CRC ok
