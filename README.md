@@ -196,30 +196,6 @@ button:
                 ESP_LOGW("main", "Readout failed: %s", LOG_STR_ARG(mbus::mbus_result_to_str(result)));
 ```
 
-All three handlers have the same variables:
-
-| Variable | Content |
-|---|---|
-| `result` | what became of the datagram or the exchange (`mbus::MBusResult`), see below |
-| `ci` | the CI field that `data` belongs to; `0` without a datagram |
-| `x` | the datagram as received: on a radio from the L field on without CRCs, on a wired link as on the wire |
-| `data` | everything behind the last header that could be read |
-
-In addition, `on_receive` has `rssi`, `freq_offset` and `lqi` as `float`, `NAN` where the source has no such
-value. The helpers `mbus::manufacturer_data(data)` and `mbus::application_error_code(data)` read `data`.
-
-| `result` | Meaning | `on_receive` | Action |
-|---|---|---|---|
-| `ok` | read as requested; `data` is plain application data | yes | `on_success` |
-| `ack` | the meter acknowledged with a single character | yes | `on_success` |
-| `security error` | not decrypted or not verified: no key, wrong key, wrong MAC, unprotected data although a key is set | yes | `on_error` |
-| `not decoded` | plain data that was not read, or not to its end: CI field not implemented, compact frame with an unknown format | yes | `on_error` |
-| `application error` | the meter reports an error; `data` holds its error bytes | yes | `on_error` |
-| `invalid response` | a valid datagram that is not the expected answer, or an invalid one | first case only | `on_error` |
-| `no response` | the meter did not answer | no | `on_error` |
-| `busy` | the instance or its UART is in use | no | `on_error` |
-| `invalid request` | the datagram cannot be sent | no | `on_error` |
-
 ### Complete Examples: WaterStarM Water Meter
 
 The repository has three full, ready-to-flash configurations for the same meter (WaterStarM M-ETH Q3 2.5),
