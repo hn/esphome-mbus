@@ -44,14 +44,20 @@ static constexpr uint8_t ADDRESS_BROADCAST = 255;
 // Selection of a device by its secondary address (EN 13757-7:2018, Table 2 and 8.4)
 static constexpr uint8_t CI_SELECT = 0x52;
 
-// Application header behind the CI field: long (12 bytes) with 72h and 76h, short (4 bytes) with 7Ah, none else
-// (EN 13757-7:2018, Table 2)
+// Application header behind the CI field of an answer (EN 13757-7:2018, Table 2): long (12 bytes) with 72h, the
+// compact frame 73h, the application error 6Fh and the alarm 75h, short (4 bytes) with 7Ah, 7Bh, 6Eh and 74h,
+// none else
 inline size_t application_header_size(uint8_t ci) {
   switch (ci) {
+    case 0x6F:
     case 0x72:
-    case 0x76:
+    case 0x73:
+    case 0x75:
       return 12;
+    case 0x6E:
+    case 0x74:
     case 0x7A:
+    case 0x7B:
       return 4;
     default:
       return 0;
@@ -236,6 +242,19 @@ inline bool is_master_frame(const Frame &frame) {
 inline bool is_rsp_ud(const Frame &frame) {
   return frame.type == FrameType::FRAME_TYPE_LONG &&
          (frame.control & static_cast<uint8_t>(~(CONTROL_ACD | CONTROL_DFC))) == CONTROL_RSP_UD;
+}
+
+// CI fields of a compact frame without, with the short and with the long header (EN 13757-3:2018, Table G.2)
+inline bool is_compact_frame(uint8_t ci) { return ci == 0x79 || ci == 0x7B || ci == 0x73; }
+
+// CI fields of a general application error (EN 13757-3:2018, 10.3)
+inline bool is_application_error(uint8_t ci) { return ci == 0x6E || ci == 0x6F || ci == 0x70; }
+
+// First error byte of an application error, which sits behind the header of its CI field; 0 (unspecified error)
+// if there is none (EN 13757-3:2018, Table 21). data points behind the CI field.
+inline uint8_t first_error_byte(uint8_t ci, const uint8_t *data, size_t length) {
+  const size_t header = application_header_size(ci);
+  return data != nullptr && length > header ? data[header] : 0x00;
 }
 
 // Bits on the line per byte: start bit, 8 data bits, even parity, stop bit (EN 13757-2:2018, 5.4)

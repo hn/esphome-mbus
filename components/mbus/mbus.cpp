@@ -3,6 +3,8 @@
 
 #include "esphome/core/log.h"
 
+#include <cinttypes>
+
 namespace esphome::mbus {
 
 ESPHOME_LOG_TAG(TAG, "mbus");
@@ -39,27 +41,26 @@ void MBusComponent::register_record_listener(MBusRecordListener *listener) {
 
 void MBusComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "M-Bus:");
-  ESP_LOGCONFIG(TAG, "  ID: %s", this->config_id_.c_str());
 #ifdef USE_MBUS_CC1101
   if (this->radio_cc1101_ != nullptr) {
-    ESP_LOGCONFIG(TAG, "  Radio: CC1101");
+    ESP_LOGCONFIG(TAG, "  Source: CC1101 Radio");
   }
 #endif
 #ifdef USE_MBUS_SX126X
   if (this->radio_sx126x_ != nullptr) {
-    ESP_LOGCONFIG(TAG, "  Radio: SX126x");
+    ESP_LOGCONFIG(TAG, "  Source: SX126x Radio");
   }
 #endif
 #ifdef USE_MBUS_SX127X
   if (this->radio_sx127x_ != nullptr) {
-    ESP_LOGCONFIG(TAG, "  Radio: SX127x");
+    ESP_LOGCONFIG(TAG, "  Source: SX127x Radio");
   }
 #endif
 #ifdef USE_MBUS_WIRED_UART
   if (this->parent_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Source: Wired UART");
     LOG_UPDATE_INTERVAL(this);
-    ESP_LOGCONFIG(TAG, "  Max telegrams: %u", this->wired_max_telegrams_);
+    ESP_LOGCONFIG(TAG, "  Max datagrams: %u", this->wired_max_datagrams_);
     if (this->wired_wakeup_enabled_) {
       ESP_LOGCONFIG(TAG, "  Wake-up after idle: %ums", static_cast<unsigned>(this->wired_wakeup_after_idle_));
     }
@@ -74,10 +75,13 @@ void MBusComponent::dump_config() {
   }
 #endif
   if (this->has_secondary_address_) {
-    ESP_LOGCONFIG(TAG, "  Secondary address: 0x%016llX", static_cast<unsigned long long>(this->secondary_address_));
+    ESP_LOGCONFIG(TAG, "  Secondary address: 0x%016" PRIX64, this->secondary_address_);
   }
   if (this->has_encryption_key_) {
     ESP_LOGCONFIG(TAG, "  Encryption key: configured");
+  }
+  if (this->reads_compact_frames_()) {
+    ESP_LOGCONFIG(TAG, "  Compact frames: YES");
   }
   ESP_LOGCONFIG(TAG, "  Dump records: %s", YESNO(this->dump_records_enabled_));
 }
@@ -97,17 +101,16 @@ void MBusComponent::on_packet(const std::vector<uint8_t> &packet, float freq_off
 #endif
 
 #if defined(USE_MBUS_SX126X) || defined(USE_MBUS_SX127X)
-void MBusComponent::on_packet(const std::vector<uint8_t> &packet, float rssi, float snr) {
+void MBusComponent::on_packet(const std::vector<uint8_t> &packet, float rssi, float /*snr*/) {
   // SX126x/SX127x callback: no frequency offset or LQI available.
   MBusReceiveMeta meta;
   meta.has_rssi = true;
   meta.rssi = rssi;
-  meta.has_snr = true;
-  meta.snr = snr;
   this->enqueue_packet_(packet, meta);
 }
 #endif
 
+#ifdef USE_MBUS_RADIO
 void MBusComponent::enqueue_packet_(const std::vector<uint8_t> &packet, const MBusReceiveMeta &meta) {
   if (packet.empty()) {
     return;
@@ -118,6 +121,7 @@ void MBusComponent::enqueue_packet_(const std::vector<uint8_t> &packet, const MB
   }
   this->pending_packets_.push_back(PendingRadioPacket{packet, meta});
 }
+#endif
 
 void MBusComponent::update() {
 #ifdef USE_MBUS_WIRED_UART
@@ -133,14 +137,17 @@ void MBusComponent::loop() {
     this->loop_wired_uart_();
   }
 #endif
+#ifdef USE_MBUS_RADIO
   if (this->pending_packets_.empty()) {
     return;
   }
   PendingRadioPacket pending = std::move(this->pending_packets_.front());
   this->pending_packets_.pop_front();
   this->process_radio_packet_(pending);
+#endif
 }
 
+#ifdef USE_MBUS_RADIO
 void MBusComponent::process_radio_packet_(const PendingRadioPacket &pending) {
   const std::vector<uint8_t> &packet = pending.packet;
   if (packet.empty()) {
@@ -153,5 +160,6 @@ void MBusComponent::process_radio_packet_(const PendingRadioPacket &pending) {
     this->parse_t_mode_(packet, pending.meta);
   }
 }
+#endif
 
 }  // namespace esphome::mbus

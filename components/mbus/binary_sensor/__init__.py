@@ -3,7 +3,7 @@ from esphome.components import binary_sensor
 import esphome.config_validation as cv
 from esphome.types import ConfigType
 
-from .. import RECORD_SCHEMA, mbus_ns, register_record_matcher
+from .. import RECORD_SCHEMA, mbus_ns, register_record_matcher, validate_record_matcher
 
 DEPENDENCIES = ["mbus"]
 
@@ -13,11 +13,12 @@ MBusBinarySensor = mbus_ns.class_(
     "MBusBinarySensor", binary_sensor.BinarySensor, cg.Component
 )
 
-CONFIG_SCHEMA = (
+CONFIG_SCHEMA = cv.All(
     binary_sensor.binary_sensor_schema(MBusBinarySensor)
     .extend(RECORD_SCHEMA)
     .extend({cv.Required(CONF_BIT): cv.int_range(min=0, max=63)})
-    .extend(cv.COMPONENT_SCHEMA)
+    .extend(cv.COMPONENT_SCHEMA),
+    validate_record_matcher,
 )
 
 

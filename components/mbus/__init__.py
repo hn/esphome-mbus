@@ -1,12 +1,13 @@
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import cc1101, sx126x, sx127x, uart
+from esphome.components.const import CONF_ON_RECEIVE
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_DATA,
     CONF_ID,
     CONF_ON_ERROR,
-    CONF_ON_RESPONSE,
+    CONF_ON_SUCCESS,
     CONF_STORAGE,
     CONF_UPDATE_INTERVAL,
     PLATFORM_ESP32,
@@ -30,10 +31,12 @@ CONF_CONTINUE_ON_ERROR = "continue_on_error"
 CONF_DIF = "dif"
 CONF_DUMP_RECORDS = "dump_records"
 CONF_ENCRYPTION_KEY = "encryption_key"
+CONF_PARSE_RECORDS = "parse_records"
+CONF_COMPACT_FRAMES = "compact_frames"
 CONF_FUNCTION = "function"
 CONF_MBUS_ID = "mbus_id"
 CONF_MAX_RETRIES = "max_retries"
-CONF_MAX_TELEGRAMS = "max_telegrams"
+CONF_MAX_DATAGRAMS = "max_datagrams"
 CONF_METER_ID = "meter_id"
 CONF_PRIMARY_ADDRESS = "primary_address"
 CONF_RADIO_CC1101_ID = "radio_cc1101_id"
@@ -68,14 +71,16 @@ def validate_primary_address(value: object) -> int:
     return value
 
 
-def validate_host_options(config: ConfigType) -> ConfigType:
-    if CORE.is_host and CONF_ENCRYPTION_KEY in config:
-        raise cv.Invalid("encryption_key is not supported on the host platform")
-    return config
-
-
 def validate_source_options(config: ConfigType) -> ConfigType:
     wired = CONF_WIRED_UART_ID in config
+    # A wired instance has its meter by its address; the filter is for what a radio hears
+    if wired and CONF_METER_ID in config:
+        raise cv.Invalid(
+            "meter_id is only valid with a radio; a wired meter is selected by its address"
+        )
+    # The formats of a compact frame are kept per instance, so the instance has to belong to one meter
+    if config[CONF_COMPACT_FRAMES] and not wired and CONF_METER_ID not in config:
+        raise cv.Invalid("compact_frames requires meter_id")
     addresses = [
         key for key in (CONF_PRIMARY_ADDRESS, CONF_SECONDARY_ADDRESS) if key in config
     ]
@@ -87,8 +92,8 @@ def validate_source_options(config: ConfigType) -> ConfigType:
         raise cv.Invalid(f"{addresses[0]} is only valid with wired_uart_id")
     if CONF_WIRED_UART_ID not in config and CONF_UPDATE_INTERVAL in config:
         raise cv.Invalid("update_interval is only valid with wired_uart_id")
-    if not wired and CONF_MAX_TELEGRAMS in config:
-        raise cv.Invalid("max_telegrams is only valid with wired_uart_id")
+    if not wired and CONF_MAX_DATAGRAMS in config:
+        raise cv.Invalid("max_datagrams is only valid with wired_uart_id")
     if CONF_WAKEUP_AFTER_IDLE in config:
         if not wired:
             raise cv.Invalid("wakeup_after_idle is only valid with wired_uart_id")
@@ -114,7 +119,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_RADIO_SX126X_ID): cv.use_id(sx126x.SX126x),
             cv.Optional(CONF_RADIO_SX127X_ID): cv.use_id(sx127x.SX127x),
             cv.Optional(CONF_WIRED_UART_ID): cv.use_id(uart.UARTComponent),
-            cv.Optional(CONF_MAX_TELEGRAMS): cv.int_range(min=1, max=255),
+            cv.Optional(CONF_MAX_DATAGRAMS): cv.int_range(min=1, max=255),
             cv.Optional(CONF_WAKEUP_AFTER_IDLE): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_PRIMARY_ADDRESS): validate_primary_address,
             cv.Optional(CONF_SECONDARY_ADDRESS): cv.hex_uint64_t,
@@ -122,17 +127,19 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ENCRYPTION_KEY): cv.bind_key(name="encryption_key"),
             cv.Optional(CONF_METER_ID): cv.hex_uint32_t,
             cv.Optional(CONF_DUMP_RECORDS, default=False): cv.boolean,
+            cv.Optional(CONF_COMPACT_FRAMES, default=False): cv.boolean,
+            cv.Optional(CONF_ON_RECEIVE): automation.validate_automation({}),
         }
     ).extend(cv.COMPONENT_SCHEMA),
-    # Mode 5 decryption needs PSA/mbedTLS (ESP32) or BearSSL (ESP8266, RP2040). The host platform has
-    # neither and is there for tests of the wired transport.
+    # Decryption needs PSA (ESP32) or BearSSL (ESP8266, RP2040). The host platform is there for
+    # tests and has neither: a key there needs BearSSL added to the build, see crypto.h.
     cv.only_on([PLATFORM_ESP32, PLATFORM_ESP8266, PLATFORM_HOST, PLATFORM_RP2040]),
-    validate_host_options,
     cv.has_exactly_one_key(*SOURCE_KEYS),
     validate_source_options,
 )
 
-# Records are matched by these fields; dif and vif are required, the others only match when set.
+# Records are matched by these fields; dif and vif are required, the others only match when set. function and
+# the lowest bit of storage repeat what the DIF says, so they are never needed, only allowed.
 RECORD_FUNCTIONS = {
     "instantaneous": 0,
     "maximum": 1,
@@ -150,18 +157,40 @@ RECORD_SCHEMA = cv.Schema(
         cv.Optional(CONF_STORAGE): cv.uint32_t,
         cv.Optional(CONF_TARIFF): cv.uint32_t,
         cv.Optional(CONF_SUBUNIT): cv.uint32_t,
-        cv.Optional(CONF_FUNCTION, default="instantaneous"): cv.enum(
-            RECORD_FUNCTIONS, lower=True
-        ),
+        cv.Optional(CONF_FUNCTION): cv.enum(RECORD_FUNCTIONS, lower=True),
     }
 )
+
+
+def validate_record_matcher(config: ConfigType) -> ConfigType:
+    """Reject a matcher that contradicts its own DIF and so could never match."""
+    # The DIF carries the function field in bits 4 and 5 and the lowest bit of the storage number in bit 6
+    # (EN 13757-3:2018, 6.3)
+    dif = config[CONF_DIF]
+    function = (dif >> 4) & 0x03
+    if CONF_FUNCTION in config and RECORD_FUNCTIONS[config[CONF_FUNCTION]] != function:
+        name = next(key for key, value in RECORD_FUNCTIONS.items() if value == function)
+        raise cv.Invalid(
+            f"dif 0x{dif:02X} says function {name}, which contradicts function "
+            f"{config[CONF_FUNCTION]}",
+            path=[CONF_FUNCTION],
+        )
+    if (storage := config.get(CONF_STORAGE)) is not None and storage & 1 != (
+        dif >> 6
+    ) & 1:
+        raise cv.Invalid(
+            f"dif 0x{dif:02X} says the storage number is {'odd' if dif & 0x40 else 'even'}, "
+            f"which contradicts storage {storage}",
+            path=[CONF_STORAGE],
+        )
+    return config
 
 
 async def register_record_matcher(var: MockObj, config: ConfigType) -> None:
     """Apply the RECORD_SCHEMA fields to a matcher entity and register it with its hub."""
     cg.add(var.set_dif(config[CONF_DIF]))
     cg.add(var.set_vif(config[CONF_VIF]))
-    cg.add(var.set_function(config[CONF_FUNCTION]))
+    cg.add_optional(var.set_function, config.get(CONF_FUNCTION))
     cg.add_optional(var.set_vif_ext, config.get(CONF_VIF_EXT))
     if (vife := config.get(CONF_VIFE)) is not None:
         cg.add(var.set_vife(vife))
@@ -192,12 +221,31 @@ async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    cg.add(var.set_config_id(str(config[CONF_ID])))
     cg.add(var.set_dump_records(config[CONF_DUMP_RECORDS]))
     if (key := config.get(CONF_ENCRYPTION_KEY)) is not None:
+        cg.add_define("USE_MBUS_ENCRYPTION_KEY")
         cg.add(var.set_encryption_key(*bytes.fromhex(key)))
     cg.add_optional(var.set_meter_id, config.get(CONF_METER_ID))
+    if config[CONF_COMPACT_FRAMES]:
+        cg.add_define("USE_MBUS_COMPACT_FRAMES")
+        cg.add(var.set_compact_frames())
 
+    for conf in config.get(CONF_ON_RECEIVE, []):
+        await automation.build_callback_automation(
+            var,
+            "add_on_receive_callback",
+            [
+                *_HANDLER_ARGS,
+                (cg.float_, "rssi"),
+                (cg.float_, "freq_offset"),
+                (cg.float_, "lqi"),
+            ],
+            conf,
+        )
+
+    # The radio framing is only built for a configuration that has a radio
+    if CONF_WIRED_UART_ID not in config:
+        cg.add_define("USE_MBUS_RADIO")
     if CONF_RADIO_CC1101_ID in config:
         cg.add_define("USE_MBUS_CC1101")
         radio = await cg.get_variable(config[CONF_RADIO_CC1101_ID])
@@ -214,7 +262,7 @@ async def to_code(config: ConfigType) -> None:
         cg.add_define("USE_MBUS_WIRED_UART")
         wired_uart = await cg.get_variable(config[CONF_WIRED_UART_ID])
         cg.add(var.set_wired_uart(wired_uart))
-        cg.add_optional(var.set_max_telegrams, config.get(CONF_MAX_TELEGRAMS))
+        cg.add_optional(var.set_max_datagrams, config.get(CONF_MAX_DATAGRAMS))
         cg.add_optional(var.set_wakeup_after_idle, config.get(CONF_WAKEUP_AFTER_IDLE))
         cg.add_optional(var.set_primary_address, config.get(CONF_PRIMARY_ADDRESS))
         cg.add_optional(var.set_secondary_address, config.get(CONF_SECONDARY_ADDRESS))
@@ -226,6 +274,13 @@ RequestUd2Action = mbus_ns.class_("RequestUd2Action", automation.Action)
 SendUdAction = mbus_ns.class_("SendUdAction", automation.Action)
 
 _BYTE_SPAN = cg.std_span.template(cg.uint8.operator("const"))
+# Variables of on_receive, on_success and on_error
+_HANDLER_ARGS = [
+    (MBusResult, "result"),
+    (cg.uint8, "ci"),
+    (_BYTE_SPAN, "x"),
+    (_BYTE_SPAN, "data"),
+]
 # A long frame carries up to 252 bytes behind the CI field (EN 13757-2:2018, 5.7)
 MAX_DATA_LENGTH = 252
 
@@ -245,16 +300,25 @@ _DATAGRAM_ACTION_SCHEMA = cv.Schema(
         cv.GenerateID(): cv.use_id(MBusComponent),
         cv.Optional(CONF_WAIT_FOR_RESPONSE, default=True): cv.boolean,
         cv.Optional(CONF_CONTINUE_ON_ERROR, default=True): cv.boolean,
-        cv.Optional(CONF_ON_RESPONSE): automation.validate_action_list,
+        cv.Optional(CONF_ON_SUCCESS): automation.validate_action_list,
         cv.Optional(CONF_ON_ERROR): automation.validate_action_list,
     }
 )
 
 # Repeating SND_NKE or REQ_UD2 does no harm, so they get the two repetitions of EN 1434-3:2008, Annex D.2.1
+_SEND_NKE_SCHEMA = _DATAGRAM_ACTION_SCHEMA.extend(
+    {cv.Optional(CONF_MAX_RETRIES, default=2): cv.int_range(min=0, max=10)}
+)
 _SIMPLE_DATAGRAM_ACTION_SCHEMA = automation.maybe_simple_id(
+    cv.All(_SEND_NKE_SCHEMA, _validate_datagram_action)
+)
+
+# parse_records: false hands the answer to on_success without reading it as records, for data a meter sends
+# without marking it as manufacturer specific
+_REQUEST_UD2_ACTION_SCHEMA = automation.maybe_simple_id(
     cv.All(
-        _DATAGRAM_ACTION_SCHEMA.extend(
-            {cv.Optional(CONF_MAX_RETRIES, default=2): cv.int_range(min=0, max=10)}
+        _SEND_NKE_SCHEMA.extend(
+            {cv.Optional(CONF_PARSE_RECORDS, default=True): cv.boolean}
         ),
         _validate_datagram_action,
     )
@@ -289,27 +353,28 @@ async def _datagram_action_to_code(
         cg.add(var.set_continue_on_error(False))
     if config[CONF_MAX_RETRIES]:
         cg.add(var.set_max_retries(config[CONF_MAX_RETRIES]))
-    if on_response := config.get(CONF_ON_RESPONSE):
-        response_template_arg = cg.TemplateArguments(
-            *template_arg, cg.bool_, cg.uint8, _BYTE_SPAN
-        )
-        response_args = [
-            *args,
-            (cg.bool_, "ack"),
-            (cg.uint8, "ci"),
-            (_BYTE_SPAN, "x"),
-        ]
-        actions = await automation.build_action_list(
-            on_response, response_template_arg, response_args
-        )
-        cg.add(var.add_on_response(actions))
-    if on_error := config.get(CONF_ON_ERROR):
-        error_template_arg = cg.TemplateArguments(*template_arg, MBusResult)
-        error_args = [*args, (MBusResult, "error")]
-        actions = await automation.build_action_list(
-            on_error, error_template_arg, error_args
-        )
-        cg.add(var.add_on_error(actions))
+    # Only mbus.request_ud2 has it, with true as the default in C++ as well
+    if not config.get(CONF_PARSE_RECORDS, True):
+        cg.add(var.set_parse_records(False))
+    # A handler inside another handler sees its own variables; those of the outer one keep their place in the
+    # argument list under another name
+    names = {name for _, name in _HANDLER_ARGS}
+    handler_template_arg = cg.TemplateArguments(
+        *template_arg, *(type_ for type_, _ in _HANDLER_ARGS)
+    )
+    handler_args = [
+        *((type_, f"outer_{name}" if name in names else name) for type_, name in args),
+        *_HANDLER_ARGS,
+    ]
+    for key, method in (
+        (CONF_ON_SUCCESS, var.add_on_success),
+        (CONF_ON_ERROR, var.add_on_error),
+    ):
+        if handlers := config.get(key):
+            actions = await automation.build_action_list(
+                handlers, handler_template_arg, handler_args
+            )
+            cg.add(method(actions))
     return var
 
 
@@ -319,7 +384,7 @@ async def _datagram_action_to_code(
 @automation.register_action(
     "mbus.request_ud2",
     RequestUd2Action,
-    _SIMPLE_DATAGRAM_ACTION_SCHEMA,
+    _REQUEST_UD2_ACTION_SCHEMA,
     synchronous=False,
 )
 async def datagram_action_to_code(

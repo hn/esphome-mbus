@@ -6,6 +6,7 @@
 #include "esphome/core/log.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstdarg>
 #include <cstdio>
 
@@ -26,10 +27,6 @@ static MBusRecordFunction dif_function_from_dif(uint8_t dif) {
     default:
       return MBusRecordFunction::MBUS_RECORD_FUNCTION_INSTANTANEOUS;
   }
-}
-
-static const char *record_function_to_string(MBusRecordFunction function) {
-  return mbus_record_function_to_string(static_cast<uint8_t>(function));
 }
 
 // Appends printf-style text to a fixed buffer; output beyond the buffer is cut off.
@@ -59,9 +56,10 @@ static void log_record(const MBusRecord &record) {
   char message[512];
   size_t length = 0;
   append_to(message, sizeof(message), length,
-            "Record: dif=0x%02X vif=0x%02X storage=%u tariff=%u subunit=%u function=%s pos=%u vif_raw=0x%02X",
-            record.dif, record.vif, static_cast<unsigned>(record.storage), static_cast<unsigned>(record.tariff),
-            static_cast<unsigned>(record.subunit), record_function_to_string(record.function),
+            "Record: dif=0x%02X vif=0x%02X storage=%" PRIu64 " tariff=%u subunit=%u function=%s pos=%u vif_raw=0x%02X",
+            record.dif, record.vif, static_cast<uint64_t>(record.storage), static_cast<unsigned>(record.tariff),
+            static_cast<unsigned>(record.subunit),
+            LOG_STR_ARG(mbus_record_function_to_str(static_cast<uint8_t>(record.function))),
             static_cast<unsigned>(record.pos), record.vif_raw);
   if (record.has_vif_ext) {
     append_to(message, sizeof(message), length, " vif_ext=0x%04X", static_cast<unsigned>(record.vif_ext));
@@ -70,7 +68,7 @@ static void log_record(const MBusRecord &record) {
   append_hex_list(message, sizeof(message), length, "vife", record.vife.data(), record.vife.size());
   char raw[format_hex_pretty_size(MBUS_LOG_HEX_MAX_BYTES)];
   format_hex_pretty_to(raw, record.raw_data, std::min(record.raw_length, MBUS_LOG_HEX_MAX_BYTES), '.');
-  append_to(message, sizeof(message), length, " data_type=%s raw=%s", record.data_type, raw);
+  append_to(message, sizeof(message), length, " data_type=%s raw=%s", LOG_STR_ARG(record.data_type), raw);
   if (!record.custom_vif.empty()) {
     append_to(message, sizeof(message), length, " custom_vif=%s", record.custom_vif.c_str());
   }
@@ -81,7 +79,7 @@ static void log_record(const MBusRecord &record) {
     append_to(message, sizeof(message), length, "; decoded: value=%s", record.decoded.c_str());
   } else {
     if (record.has_raw_value) {
-      append_to(message, sizeof(message), length, " raw_value=%lld", static_cast<long long>(record.raw_value));
+      append_to(message, sizeof(message), length, " raw_value=%" PRId64, static_cast<int64_t>(record.raw_value));
     }
     if (record.has_decoded_value) {
       append_to(message, sizeof(message), length, "; decoded: scale=%.12g unit=%s value=%.12g", record.scale,
@@ -91,14 +89,15 @@ static void log_record(const MBusRecord &record) {
   ESP_LOGD(TAG, "%s", message);
 }
 
-static void log_special_record(uint8_t dif, size_t pos, const char *data_type, const uint8_t *data, size_t length) {
+static void log_special_record(uint8_t dif, size_t pos, const LogString *data_type, const uint8_t *data,
+                               size_t length) {
   char raw[format_hex_pretty_size(MBUS_LOG_HEX_MAX_BYTES)];
   format_hex_pretty_to(raw, data, std::min(length, MBUS_LOG_HEX_MAX_BYTES), '.');
   ESP_LOGD(TAG, "Record: dif=0x%02X pos=%u data_type=%s raw=%s; decoded: type=%s", dif, static_cast<unsigned>(pos),
-           data_type, raw, data_type);
+           LOG_STR_ARG(data_type), raw, LOG_STR_ARG(data_type));
 }
 
-template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_t> &payload, F &&callback) {
+template<typename F> bool MBusComponent::parse_records_(std::span<const uint8_t> payload, F &&callback) {
   size_t pos = 0;
   while (pos < payload.size()) {
     // Special DIFs: 2Fh idle filler, 0Fh manufacturer specific data, 1Fh the same with more records in the next
@@ -107,26 +106,34 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
       pos++;
     }
     if (pos >= payload.size()) {
-      return;
+      return true;
     }
 
     const size_t record_pos = pos;
     const uint8_t dif = payload[pos++];
     if (dif == 0x0F) {
       if (this->dump_records_enabled_) {
-        log_special_record(dif, record_pos, "manufacturer_specific", payload.data() + pos, payload.size() - pos);
+        log_special_record(dif, record_pos, LOG_STR("manufacturer_specific"), payload.data() + pos,
+                           payload.size() - pos);
       }
-      return;
+      return true;
     }
     if (dif == 0x1F) {
       this->more_records_follow_ = true;
       if (this->dump_records_enabled_) {
-        log_special_record(dif, record_pos, "more_records_follow", payload.data() + pos, payload.size() - pos);
+        log_special_record(dif, record_pos, LOG_STR("more_records_follow"), payload.data() + pos, payload.size() - pos);
       }
-      return;
+      return true;
+    }
+    // The other special functions are reserved or a request of the master: no record follows a known layout
+    if ((dif & 0x0F) == 0x0F) {
+      ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=special function dif=0x%02X",
+               static_cast<unsigned>(record_pos), dif);
+      return false;
     }
 
-    uint32_t storage = (dif & 0x40) != 0 ? 1 : 0;
+    // Up to 10 DIFEs give 41 bits of storage number, 20 of tariff and 10 of subunit (EN 13757-3:2018, 6.3.5)
+    uint64_t storage = (dif & 0x40) != 0 ? 1 : 0;
     uint32_t tariff = 0;
     uint32_t subunit = 0;
     uint8_t storage_shift = 1;
@@ -138,16 +145,16 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
       if (pos >= payload.size()) {
         ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=truncated DIFE dif=0x%02X",
                  static_cast<unsigned>(record_pos), dif);
-        return;
+        return false;
       }
-      if (dife.size() >= 8) {
+      if (dife.size() >= records_codec::MAX_EXTENSIONS) {
         ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=too many DIFE entries dif=0x%02X",
                  static_cast<unsigned>(record_pos), dif);
-        return;
+        return false;
       }
       const uint8_t item = payload[pos++];
       dife.push_back(item);
-      storage |= uint32_t(item & 0x0F) << storage_shift;
+      storage |= uint64_t(item & 0x0F) << storage_shift;
       tariff |= uint32_t((item >> 4) & 0x03) << tariff_shift;
       subunit |= uint32_t((item >> 6) & 0x01) << subunit_shift;
       storage_shift += 4;
@@ -159,7 +166,7 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
     if (pos >= payload.size()) {
       ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=missing VIF dif=0x%02X", static_cast<unsigned>(record_pos),
                dif);
-      return;
+      return false;
     }
     const uint8_t vif_raw = payload[pos++];
     const uint8_t vif_base = vif_raw & 0x7F;
@@ -168,13 +175,13 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
       if (pos >= payload.size()) {
         ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=missing custom VIF length dif=0x%02X vif=0x%02X",
                  static_cast<unsigned>(record_pos), dif, vif_raw);
-        return;
+        return false;
       }
       const uint8_t custom_vif_length = payload[pos++];
       if (custom_vif_length > 128) {
         ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=custom VIF too long dif=0x%02X vif=0x%02X length=%u",
                  static_cast<unsigned>(record_pos), dif, vif_raw, static_cast<unsigned>(custom_vif_length));
-        return;
+        return false;
       }
       if (pos + custom_vif_length > payload.size()) {
         ESP_LOGW(
@@ -182,7 +189,7 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
             "Record parse stopped: pos=%u reason=truncated custom VIF dif=0x%02X vif=0x%02X needed=%u available=%u",
             static_cast<unsigned>(record_pos), dif, vif_raw, static_cast<unsigned>(custom_vif_length),
             static_cast<unsigned>(payload.size() - pos));
-        return;
+        return false;
       }
       custom_vif = records_codec::decode_variable_ascii(payload.data() + pos, custom_vif_length);
       pos += custom_vif_length;
@@ -194,19 +201,19 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
       if (pos >= payload.size()) {
         ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=truncated VIFE dif=0x%02X vif=0x%02X",
                  static_cast<unsigned>(record_pos), dif, vif_raw);
-        return;
+        return false;
       }
       const uint8_t item = payload[pos++];
       all_vife.push_back(item);
       extension = item & 0x80;
-      if (all_vife.size() > 8) {
+      if (all_vife.size() > records_codec::MAX_EXTENSIONS) {
         ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=too many VIFE entries dif=0x%02X vif=0x%02X",
                  static_cast<unsigned>(record_pos), dif, vif_raw);
-        return;
+        return false;
       }
     }
 
-    // For extension markers (0xFB/0xFC/0xFD/0xEF/0xFF) the first VIFE is part of the
+    // For extension markers (0xFB/0xFD/0xEF/0xFF) the first VIFE is part of the
     // VIF code itself. Everything else is a combinable VIFE.
     const bool vif_extension = vif_is_extension_marker(vif_raw);
     uint16_t vif_key = vif_base;
@@ -230,79 +237,71 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
     record.tariff = tariff;
     record.subunit = subunit;
     record.function = dif_function_from_dif(dif);
-    record.data_type = record_data_type_to_string(dif, vif_key);
+    record.data_type = record_data_type_to_str(dif, vif_key);
 
-    // Decode combinable VIFE flags (only when this is not an extension marker VIF).
-    for (const uint8_t item : vife) {
-      const char *name = vife_combinable_to_string(item);
-      if (name != nullptr) {
-        if (!record.flags.empty()) {
-          record.flags += ",";
-        }
-        record.flags += name;
-      }
-    }
+    const VifeEffects vife_effects = vife_interpret(vife.data(), vife.size(), &record.flags);
 
     if ((dif & 0x0F) == 0x0D) {
       if (pos >= payload.size()) {
         ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=missing LVAR dif=0x%02X vif=0x%02X",
                  static_cast<unsigned>(record_pos), dif, vif_raw);
-        return;
+        return false;
       }
       const uint8_t lvar = payload[pos++];
       size_t data_length = 0;
       if (!records_codec::variable_data_length(lvar, &data_length)) {
-        ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=unsupported LVAR dif=0x%02X vif=0x%02X lvar=0x%02X",
+        ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=unsupported LVAR dif=0x%02X vif=0x%02X LVAR=0x%02X",
                  static_cast<unsigned>(record_pos), dif, vif_raw, lvar);
-        return;
+        return false;
       }
       if (pos + data_length > payload.size()) {
         ESP_LOGW(TAG,
-                 "Record parse stopped: pos=%u reason=truncated variable data dif=0x%02X vif=0x%02X lvar=0x%02X "
+                 "Record parse stopped: pos=%u reason=truncated variable data dif=0x%02X vif=0x%02X LVAR=0x%02X "
                  "needed=%u available=%u",
                  static_cast<unsigned>(record_pos), dif, vif_raw, lvar, static_cast<unsigned>(data_length),
                  static_cast<unsigned>(payload.size() - pos));
-        return;
+        return false;
       }
       const uint8_t *data = payload.data() + pos;
       record.raw_data = data;
       record.raw_length = data_length;
       if (lvar <= 0xBF) {
-        record.data_type = "lvar_ascii";
+        record.data_type = LOG_STR("lvar_ascii");
         record.decoded = records_codec::decode_variable_ascii(data, data_length);
       } else if (lvar >= 0xC0 && lvar <= 0xCF) {
-        record.data_type = "lvar_bcd";
-        if (data_length <= 8) {
+        record.data_type = LOG_STR("lvar_bcd");
+        if (!records_codec::bcd_is_valid(data, data_length)) {
+          record.decoded = "invalid";
+        } else if (data_length <= 8) {
           record.raw_value = records_codec::decode_bcd_le(data, data_length);
           record.has_raw_value = true;
           record.value = static_cast<double>(record.raw_value);
           record.has_value = true;
         }
       } else if (lvar >= 0xD0 && lvar <= 0xDF) {
-        record.data_type = "lvar_negative_bcd";
-        if (data_length <= 8) {
+        record.data_type = LOG_STR("lvar_negative_bcd");
+        if (!records_codec::bcd_is_valid(data, data_length)) {
+          record.decoded = "invalid";
+        } else if (data_length <= 8) {
           record.raw_value = records_codec::decode_lvar_negative_bcd(data, data_length);
           record.has_raw_value = true;
           record.value = static_cast<double>(record.raw_value);
           record.has_value = true;
         }
       } else if (lvar >= 0xE0 && lvar <= 0xEF) {
-        record.data_type = "lvar_binary";
+        record.data_type = LOG_STR("lvar_binary");
         if (data_length <= 7) {
           record.raw_value = static_cast<int64_t>(records_codec::decode_unsigned_le(data, data_length));
           record.has_raw_value = true;
           record.value = static_cast<double>(record.raw_value);
           record.has_value = true;
         }
-      } else if (lvar == 0xF4) {
-        record.data_type = "lvar_real32";
-        record.value = records_codec::decode_real32_le(data);
-        record.has_value = true;
       } else {
-        record.data_type = "lvar_real";
+        // 16 bytes and more: shown as raw bytes only
+        record.data_type = LOG_STR("lvar_binary");
       }
       if (record.has_value && vif_scale_unit(vif_key, &record.scale, &record.unit)) {
-        record.decoded_value = record.value * record.scale;
+        record.decoded_value = record.value * record.scale * vife_effects.factor;
         record.has_decoded_value = true;
       } else {
         vif_scale_unit(vif_key, &record.scale, &record.unit);
@@ -317,17 +316,22 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
       ESP_LOGW(TAG, "Record parse stopped: pos=%u reason=truncated data dif=0x%02X vif=0x%02X needed=%u available=%u",
                static_cast<unsigned>(record_pos), dif, vif_raw, static_cast<unsigned>(data_length),
                static_cast<unsigned>(payload.size() - pos));
-      return;
+      return false;
     }
 
     const uint8_t *data = payload.data() + pos;
     record.raw_data = data;
     record.raw_length = data_length;
 
-    // Date/time records are decoded from their bit layout, not as scaled numbers.
-    if (vif_is_datetime(vif_key)) {
-      if (vif_key == 0x6C) {
+    // Date/time records are decoded from their bit layout, not as scaled numbers. The type follows from the
+    // data field, so each decoder gets exactly the bytes it reads.
+    const MBusDateTimeType date_time_type = record_date_time_type(dif, vif_key, vife_effects.timestamp);
+    if (date_time_type != MBusDateTimeType::MBUS_DATE_TIME_TYPE_NONE) {
+      record.data_type = record_data_type_to_str(dif, vif_key, vife_effects.timestamp);
+      if (date_time_type == MBusDateTimeType::MBUS_DATE_TIME_TYPE_G) {
         decode_date_type_g(data, &record.decoded);
+      } else if (date_time_type == MBusDateTimeType::MBUS_DATE_TIME_TYPE_J) {
+        decode_time_type_j(data, &record.decoded);
       } else {
         decode_datetime_type_f(data, data_length, &record.decoded);
       }
@@ -337,15 +341,25 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
     }
 
     if (records_codec::dif_is_integer(dif)) {
-      record.raw_value = records_codec::decode_signed_le(data, data_length);
+      if (vife_effects.unsigned_value) {
+        const uint64_t unsigned_value = records_codec::decode_unsigned_le(data, data_length);
+        record.raw_value = static_cast<int64_t>(unsigned_value);
+        record.value = static_cast<double>(unsigned_value);
+      } else {
+        record.raw_value = records_codec::decode_signed_le(data, data_length);
+        record.value = static_cast<double>(record.raw_value);
+      }
       record.has_raw_value = true;
-      record.value = static_cast<double>(record.raw_value);
       record.has_value = true;
     } else if (records_codec::dif_is_bcd(dif)) {
-      record.raw_value = records_codec::decode_bcd_le(data, data_length);
-      record.has_raw_value = true;
-      record.value = static_cast<double>(record.raw_value);
-      record.has_value = true;
+      if (records_codec::bcd_is_valid(data, data_length)) {
+        record.raw_value = records_codec::decode_bcd_le(data, data_length);
+        record.has_raw_value = true;
+        record.value = static_cast<double>(record.raw_value);
+        record.has_value = true;
+      } else {
+        record.decoded = "invalid";
+      }
     } else if ((dif & 0x0F) == 0x05) {
       record.value = records_codec::decode_real32_le(data);
       record.has_value = true;
@@ -354,10 +368,7 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
     // VIF/VIFE interpretation is only diagnostic; sensor publishing uses the
     // unscaled value so ESPHome filters remain in control.
     if (record.has_value && vif_scale_unit(vif_key, &record.scale, &record.unit)) {
-      record.decoded_value = record.value * record.scale;
-      for (const uint8_t item : vife) {
-        vife_apply_correction(item, &record.decoded_value);
-      }
+      record.decoded_value = record.value * record.scale * vife_effects.factor;
       record.has_decoded_value = true;
     } else {
       vif_scale_unit(vif_key, &record.scale, &record.unit);
@@ -366,25 +377,26 @@ template<typename F> void MBusComponent::parse_records_(const std::vector<uint8_
     callback(record);
     pos += data_length;
   }
+  return true;
 }
 
-void MBusComponent::dump_records_(const std::vector<uint8_t> &payload) {
-  this->parse_records_(payload, [](const MBusRecord &record) { log_record(record); });
-}
-
-void MBusComponent::process_records_(const std::vector<uint8_t> &payload) {
+bool MBusComponent::process_records_(std::span<const uint8_t> payload) {
 #ifdef USE_MBUS_WIRED_UART
   // The answer to a command is manufacturer specific as a rule and belongs to the caller of send_ud() only
   if (this->wired_operation_ == MBusWiredOperation::MBUS_WIRED_OPERATION_SEND_UD) {
-    ESP_LOGD(TAG, "Command answer: %u bytes, not parsed as records", static_cast<unsigned>(payload.size()));
-    return;
+    ESP_LOGD(TAG, "Command response: %u bytes, not parsed as records", static_cast<unsigned>(payload.size()));
+    return true;
+  }
+  if (!this->wired_records_expected_()) {
+    ESP_LOGD(TAG, "Response: %u bytes, not parsed as records", static_cast<unsigned>(payload.size()));
+    return true;
   }
 #endif
   // A wired readout has to find DIF 1Fh even if nobody listens to the records
   if (!this->dump_records_enabled_ && this->record_listeners_.empty() && !this->is_wired_()) {
-    return;
+    return true;
   }
-  this->parse_records_(payload, [this](const MBusRecord &record) {
+  return this->parse_records_(payload, [this](const MBusRecord &record) {
     if (this->dump_records_enabled_) {
       log_record(record);
     }
@@ -401,8 +413,8 @@ void MBusComponent::publish_record_(const MBusRecord &record) const {
     }
   }
   if (matches == 0) {
-    ESP_LOGV(TAG, "No configured sensor matched record: dif=0x%02X vif=0x%02X storage=%u tariff=%u subunit=%u",
-             record.dif, record.vif, static_cast<unsigned>(record.storage), static_cast<unsigned>(record.tariff),
+    ESP_LOGV(TAG, "No configured sensor matched record: dif=0x%02X vif=0x%02X storage=%llu tariff=%u subunit=%u",
+             record.dif, record.vif, static_cast<uint64_t>(record.storage), static_cast<unsigned>(record.tariff),
              static_cast<unsigned>(record.subunit));
     return;
   }

@@ -59,6 +59,7 @@ void MBusComponent::send_wired_(const uint8_t *data, size_t size, size_t max_res
   // Whatever is left of an earlier exchange must not be taken for the answer
   this->drain_wired_rx_();
   this->wired_receiver_.reset();
+  this->wired_frame_reported_ = false;
   this->write_array(data, size);
   // The answer time counts from the end of the datagram (EN 13757-2:2018, 5.7.6), which leaves the UART
   // size * 11 bit times after this call. loop() sees the last byte up to one loop interval late.
@@ -135,6 +136,30 @@ wired_frame_codec::ReceiveResult MBusComponent::receive_wired_() {
   return this->wired_receiver_.result();
 }
 
+void MBusComponent::report_wired_frame_(MBusResult result, uint8_t ci, std::span<const uint8_t> data) {
+  if (this->wired_frame_reported_) {
+    return;
+  }
+  this->wired_frame_reported_ = true;
+  this->report_received_(result, ci,
+                         std::span<const uint8_t>(this->wired_receiver_.data(), this->wired_receiver_.frame().size),
+                         data, MBusReceiveMeta{});
+}
+
+void MBusComponent::report_wired_link_frame_() {
+  const wired_frame_codec::Frame &frame = this->wired_receiver_.frame();
+  if (frame.type == wired_frame_codec::FrameType::FRAME_TYPE_ACK) {
+    this->report_wired_frame_(MBusResult::MBUS_RESULT_ACK, 0, {});
+  } else {
+    this->report_wired_frame_(MBusResult::MBUS_RESULT_INVALID_RESPONSE, frame.ci, {});
+  }
+}
+
+bool MBusComponent::wired_records_expected_() const {
+  return this->wired_operation_ == MBusWiredOperation::MBUS_WIRED_OPERATION_READOUT ||
+         (this->wired_operation_ == MBusWiredOperation::MBUS_WIRED_OPERATION_REQUEST_UD2 && this->wired_parse_records_);
+}
+
 void MBusComponent::retry_wired_uart_(const char *reason, MBusResult result, uint32_t now) {
   if (this->wired_receiver_.size() > 0) {
     const size_t size = std::min(this->wired_receiver_.size(), MBUS_LOG_HEX_MAX_BYTES);
@@ -162,7 +187,7 @@ void MBusComponent::retry_wired_uart_(const char *reason, MBusResult result, uin
 
 // Ends the exchange and reports it. The callback may start the next datagram, so nothing touches the state
 // after it; the answer stays in the receiver until then.
-void MBusComponent::finish_wired_transaction_(MBusResult result) {
+void MBusComponent::finish_wired_transaction_(MBusResult result, const MBusApplicationResult *answer) {
   const mbus_response_callback_t callback = this->wired_callback_;
   void *context = this->wired_callback_context_;
   this->wired_callback_ = nullptr;
@@ -179,14 +204,13 @@ void MBusComponent::finish_wired_transaction_(MBusResult result) {
     return;
   }
   MBusResponse response;
-  if (result == MBusResult::MBUS_RESULT_OK) {
-    const wired_frame_codec::Frame &frame = this->wired_receiver_.frame();
-    response.ack = frame.type == wired_frame_codec::FrameType::FRAME_TYPE_ACK;
-    if (!response.ack) {
-      const size_t header = std::min(wired_frame_codec::application_header_size(frame.ci), frame.data_length);
-      response.ci = frame.ci;
-      response.data = std::span<const uint8_t>(frame.data + header, frame.data_length - header);
-    }
+  // An acknowledge or an answer the application layer has seen is still in the receiver
+  if (answer != nullptr || result == MBusResult::MBUS_RESULT_ACK) {
+    response.x = std::span<const uint8_t>(this->wired_receiver_.data(), this->wired_receiver_.frame().size);
+  }
+  if (answer != nullptr) {
+    response.ci = answer->ci;
+    response.data = answer->data;
   }
   callback(context, result, response);
 }
@@ -268,7 +292,7 @@ void MBusComponent::loop_wired_uart_() {
         return;
       }
       this->wired_nke_count_ = 0;
-      this->wired_telegram_count_ = 0;
+      this->wired_datagram_count_ = 0;
       this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_SEND_NKE;
       return;
     case MBusWiredUartState::MBUS_WIRED_UART_STATE_WAKEUP_SEND: {
@@ -332,8 +356,12 @@ void MBusComponent::loop_wired_uart_() {
       this->wired_state_ = MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_NKE;
       return;
     case MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_NKE: {
-      const bool acknowledged = this->receive_wired_() == wired_frame_codec::ReceiveResult::RECEIVE_RESULT_FRAME &&
-                                this->wired_receiver_.frame().type == wired_frame_codec::FrameType::FRAME_TYPE_ACK;
+      const bool received = this->receive_wired_() == wired_frame_codec::ReceiveResult::RECEIVE_RESULT_FRAME;
+      if (received) {
+        this->report_wired_link_frame_();
+      }
+      const bool acknowledged =
+          received && this->wired_receiver_.frame().type == wired_frame_codec::FrameType::FRAME_TYPE_ACK;
       if (!acknowledged && !this->wired_timeout_elapsed_(now)) {
         return;
       }
@@ -388,6 +416,7 @@ void MBusComponent::loop_wired_uart_() {
         case wired_frame_codec::ReceiveResult::RECEIVE_RESULT_FRAME:
           break;
       }
+      this->report_wired_link_frame_();
       if (this->wired_receiver_.frame().type != wired_frame_codec::FrameType::FRAME_TYPE_ACK) {
         this->retry_wired_uart_("unexpected answer to the selection", MBusResult::MBUS_RESULT_INVALID_RESPONSE, now);
         return;
@@ -458,6 +487,7 @@ void MBusComponent::loop_wired_uart_() {
         valid = ack || rsp_ud;
       }
       if (!valid) {
+        this->report_wired_link_frame_();
         this->retry_wired_uart_("unexpected response", MBusResult::MBUS_RESULT_INVALID_RESPONSE, now);
         return;
       }
@@ -467,24 +497,39 @@ void MBusComponent::loop_wired_uart_() {
       } else if (this->wired_operation_ != MBusWiredOperation::MBUS_WIRED_OPERATION_SEND_NKE) {
         this->wired_fcb_req_ = !this->wired_fcb_req_;
       }
-      if (rsp_ud) {
-        this->handle_wired_link_frame_(frame);
+      if (ack) {
+        this->report_wired_link_frame_();
+        this->finish_wired_transaction_(MBusResult::MBUS_RESULT_ACK);
+        return;
+      }
+      MBusApplicationResult answer;
+      this->handle_wired_link_frame_(frame, &answer);
+      // Not an answer of the meter of this instance, so nothing it received
+      if (answer.other_meter) {
+        this->finish_wired_transaction_(MBusResult::MBUS_RESULT_INVALID_RESPONSE);
+        return;
+      }
+      this->report_wired_frame_(answer.result, answer.ci, answer.data);
+      // The meter answered, so a repetition would change nothing: it refused, or its data cannot be read
+      if (answer.result != MBusResult::MBUS_RESULT_OK) {
+        this->finish_wired_transaction_(answer.result, &answer);
+        return;
       }
       if (this->wired_operation_ == MBusWiredOperation::MBUS_WIRED_OPERATION_READOUT) {
-        this->wired_telegram_count_++;
+        this->wired_datagram_count_++;
         // The master reads on until an answer comes without DIF 1Fh (EN 13757-3:2018, 6.5)
         if (this->more_records_follow_) {
-          if (this->wired_telegram_count_ < this->wired_max_telegrams_) {
+          if (this->wired_datagram_count_ < this->wired_max_datagrams_) {
             this->wired_begin_exchange_(MBusWiredUartState::MBUS_WIRED_UART_STATE_SEND_DATAGRAM, WIRED_MAX_ATTEMPTS);
             this->wired_gap_(MBusWiredUartState::MBUS_WIRED_UART_STATE_SEND_DATAGRAM, now);
             return;
           }
-          if (this->wired_max_telegrams_ > 1) {
-            ESP_LOGW(TAG, "Wired UART: the meter has more than max_telegrams=%u telegrams", this->wired_max_telegrams_);
+          if (this->wired_max_datagrams_ > 1) {
+            ESP_LOGW(TAG, "Wired UART: the meter has more than max_datagrams=%u datagrams", this->wired_max_datagrams_);
           }
         }
       }
-      this->finish_wired_transaction_(MBusResult::MBUS_RESULT_OK);
+      this->finish_wired_transaction_(MBusResult::MBUS_RESULT_OK, &answer);
       return;
     }
     case MBusWiredUartState::MBUS_WIRED_UART_STATE_WAIT_QUIET:
@@ -514,9 +559,14 @@ MBusResult MBusComponent::send_nke(uint8_t max_retries, mbus_response_callback_t
                                       static_cast<uint8_t>(max_retries + 1), callback, context);
 }
 
-MBusResult MBusComponent::request_ud2(uint8_t max_retries, mbus_response_callback_t callback, void *context) {
-  return this->start_wired_operation_(MBusWiredOperation::MBUS_WIRED_OPERATION_REQUEST_UD2,
-                                      static_cast<uint8_t>(max_retries + 1), callback, context);
+MBusResult MBusComponent::request_ud2(uint8_t max_retries, mbus_response_callback_t callback, void *context,
+                                      bool parse_records) {
+  const MBusResult result = this->start_wired_operation_(MBusWiredOperation::MBUS_WIRED_OPERATION_REQUEST_UD2,
+                                                         static_cast<uint8_t>(max_retries + 1), callback, context);
+  if (result == MBusResult::MBUS_RESULT_OK) {
+    this->wired_parse_records_ = parse_records;
+  }
+  return result;
 }
 
 MBusResult MBusComponent::send_ud(uint8_t ci, const uint8_t *data, size_t length, uint8_t max_retries,
@@ -542,7 +592,8 @@ MBusResult MBusComponent::send_nke(uint8_t max_retries, mbus_response_callback_t
   return MBusResult::MBUS_RESULT_INVALID_REQUEST;
 }
 
-MBusResult MBusComponent::request_ud2(uint8_t max_retries, mbus_response_callback_t callback, void *context) {
+MBusResult MBusComponent::request_ud2(uint8_t max_retries, mbus_response_callback_t callback, void *context,
+                                      bool parse_records) {
   return MBusResult::MBUS_RESULT_INVALID_REQUEST;
 }
 

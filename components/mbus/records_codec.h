@@ -8,6 +8,9 @@
 
 namespace esphome::mbus::records_codec {
 
+// A record has up to 10 DIFEs and up to 10 VIFEs (EN 13757-3:2018, 6.3.7 and 6.4.1)
+inline constexpr size_t MAX_EXTENSIONS = 10;
+
 // Length of the data from the data field of the DIF (EN 13757-3:2018, Table 4); 0 for the variable length
 // code Dh, whose length is the LVAR byte
 inline size_t dif_data_length(uint8_t dif) {
@@ -69,6 +72,19 @@ inline int64_t decode_signed_le(const uint8_t *data, size_t length) {
   return -static_cast<int64_t>(magnitude);
 }
 
+// True if the BCD digits form a number (EN 13757-3:2018, Table A.1): Ah to Eh in any digit position signal an
+// invalid value, Fh is allowed in the most significant digit only, where it marks a negative number
+inline bool bcd_is_valid(const uint8_t *data, size_t length) {
+  for (size_t i = 0; i < length; i++) {
+    const uint8_t high = data[i] >> 4;
+    const uint8_t low = data[i] & 0x0F;
+    if (low > 9 || (high > 9 && (high != 0x0F || i != length - 1))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // EN 13757-3 BCD: each byte holds two decimal digits (high nibble, low nibble). A high
 // nibble of 0xF in the most significant byte marks the whole value as negative.
 inline int64_t decode_bcd_le(const uint8_t *data, size_t length) {
@@ -122,13 +138,17 @@ inline bool variable_data_length(uint8_t lvar, size_t *length) {
     *length = lvar - 0xE0;
     return true;
   }
-  // Binary numbers of 16, 20, 24, 28 and 32 bytes, then 48 bytes; the codes behind are reserved
+  // Binary numbers of 16, 20, 24, 28 and 32 bytes, then 48 and 64 bytes; the codes behind are reserved
   if (lvar >= 0xF0 && lvar <= 0xF4) {
     *length = 4 * (lvar - 0xEC);
     return true;
   }
   if (lvar == 0xF5) {
     *length = 48;
+    return true;
+  }
+  if (lvar == 0xF6) {
+    *length = 64;
     return true;
   }
   return false;
@@ -155,6 +175,10 @@ inline size_t manufacturer_data_offset(const uint8_t *data, size_t length) {
     }
     if (dif == 0x0F || dif == 0x1F) {
       return pos;
+    }
+    // Another special function: the records cannot be walked any further
+    if ((dif & 0x0F) == 0x0F) {
+      return length;
     }
     uint8_t extension = dif & 0x80;
     while (extension != 0) {
@@ -183,9 +207,10 @@ inline size_t manufacturer_data_offset(const uint8_t *data, size_t length) {
     }
     size_t data_length = dif_data_length(dif);
     if ((dif & 0x0F) == 0x0D) {
-      if (pos >= length || !variable_data_length(data[pos++], &data_length)) {
+      if (pos >= length || !variable_data_length(data[pos], &data_length)) {
         return length;
       }
+      pos++;
     }
     pos += data_length;
   }

@@ -11,30 +11,22 @@
 
 namespace esphome::mbus {
 
-// Base of the actions that send one datagram to a wired meter and report its answer: on_response with the
-// variables ack, ci and x, on_error with the variable error.
+// Base of the actions that send one datagram to a wired meter and report the outcome: on_success for the results
+// ok and ack, on_error for every other one, both with the variables result, ci, x and data.
 template<typename... Ts> class DatagramAction : public Action<Ts...>, public Parented<MBusComponent> {
  public:
   void set_wait_for_response(bool wait_for_response) { this->flags_.wait_for_response = wait_for_response; }
   void set_continue_on_error(bool continue_on_error) { this->flags_.continue_on_error = continue_on_error; }
   void set_max_retries(uint8_t max_retries) { this->max_retries_ = max_retries; }
 
-  // Call after set_wait_for_response(): only a waiting run needs to continue after the handlers.
-  void add_on_response(const std::initializer_list<Action<Ts..., bool, uint8_t, std::span<const uint8_t>> *> &actions) {
-    this->response_.add_actions(actions);
-    if (this->flags_.wait_for_response) {
-      this->response_.add_action(new LambdaAction<Ts..., bool, uint8_t, std::span<const uint8_t>>(
-          [this](Ts... x, bool /*ack*/, uint8_t /*ci*/, std::span<const uint8_t> /*x*/) {
-            this->after_handlers_(true, x...);
-          }));
-    }
+  using handler_action_t = Action<Ts..., MBusResult, uint8_t, std::span<const uint8_t>, std::span<const uint8_t>>;
+
+  // Call both after set_wait_for_response(): only a waiting run needs to continue after the handlers.
+  void add_on_success(const std::initializer_list<handler_action_t *> &actions) {
+    this->add_handlers_(this->success_, actions, true);
   }
-  void add_on_error(const std::initializer_list<Action<Ts..., MBusResult> *> &actions) {
-    this->error_.add_actions(actions);
-    if (this->flags_.wait_for_response) {
-      this->error_.add_action(new LambdaAction<Ts..., MBusResult>(
-          [this](Ts... x, MBusResult /*error*/) { this->after_handlers_(false, x...); }));
-    }
+  void add_on_error(const std::initializer_list<handler_action_t *> &actions) {
+    this->add_handlers_(this->error_, actions, false);
   }
 
   void play_complex(const Ts &...x) override {
@@ -59,6 +51,16 @@ template<typename... Ts> class DatagramAction : public Action<Ts...>, public Par
 
  protected:
   using args_t = std::tuple<stored_trigger_arg_t<Ts>...>;
+  using handler_list_t = ActionList<Ts..., MBusResult, uint8_t, std::span<const uint8_t>, std::span<const uint8_t>>;
+
+  void add_handlers_(handler_list_t &list, const std::initializer_list<handler_action_t *> &actions, bool ok) {
+    list.add_actions(actions);
+    if (this->flags_.wait_for_response) {
+      list.add_action(new LambdaAction<Ts..., MBusResult, uint8_t, std::span<const uint8_t>, std::span<const uint8_t>>(
+          [this, ok](Ts... x, MBusResult /*result*/, uint8_t /*ci*/, std::span<const uint8_t> /*x*/,
+                     std::span<const uint8_t> /*data*/) { this->after_handlers_(ok, x...); }));
+    }
+  }
 
   virtual MBusResult start_(const Ts &...x) = 0;
 
@@ -67,7 +69,7 @@ template<typename... Ts> class DatagramAction : public Action<Ts...>, public Par
   // The datagram of a waiting run is still sent, but its result is dropped
   void stop() override {
     this->pending_.reset();
-    this->response_.stop();
+    this->success_.stop();
     this->error_.stop();
   }
 
@@ -85,16 +87,13 @@ template<typename... Ts> class DatagramAction : public Action<Ts...>, public Par
   void *context_() { return static_cast<DatagramAction *>(this); }
 
   void handle_result_(MBusResult result, const MBusResponse &response, const Ts &...x) {
-    if (result == MBusResult::MBUS_RESULT_OK) {
-      if (!this->response_.empty()) {
-        this->response_.play(x..., response.ack, response.ci, response.data);
-        return;
-      }
-    } else if (!this->error_.empty()) {
-      this->error_.play(x..., result);
+    const bool ok = result == MBusResult::MBUS_RESULT_OK || result == MBusResult::MBUS_RESULT_ACK;
+    handler_list_t &handlers = ok ? this->success_ : this->error_;
+    if (!handlers.empty()) {
+      handlers.play(x..., result, response.ci, response.x, response.data);
       return;
     }
-    this->after_handlers_(result == MBusResult::MBUS_RESULT_OK, x...);
+    this->after_handlers_(ok, x...);
   }
 
   // Continue or end the run once the handlers are done; a run that did not wait has already moved on.
@@ -110,8 +109,8 @@ template<typename... Ts> class DatagramAction : public Action<Ts...>, public Par
   }
 
   std::optional<args_t> pending_{};
-  ActionList<Ts..., bool, uint8_t, std::span<const uint8_t>> response_;
-  ActionList<Ts..., MBusResult> error_;
+  handler_list_t success_;
+  handler_list_t error_;
   uint8_t max_retries_{0};
   struct {
     uint8_t wait_for_response : 1;
@@ -128,10 +127,16 @@ template<typename... Ts> class SendNkeAction final : public DatagramAction<Ts...
 };
 
 template<typename... Ts> class RequestUd2Action final : public DatagramAction<Ts...> {
+ public:
+  void set_parse_records(bool parse_records) { this->parse_records_ = parse_records; }
+
  protected:
   MBusResult start_(const Ts &...x) override {
-    return this->parent_->request_ud2(this->max_retries_, &RequestUd2Action::notify, this->context_());
+    return this->parent_->request_ud2(this->max_retries_, &RequestUd2Action::notify, this->context_(),
+                                      this->parse_records_);
   }
+
+  bool parse_records_{true};
 };
 
 template<typename... Ts> class SendUdAction final : public DatagramAction<Ts...> {

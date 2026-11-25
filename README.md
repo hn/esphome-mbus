@@ -5,10 +5,10 @@ for [ESPHome](https://esphome.io/): wireless (CC1101, SX126x, SX127x) and wired 
 component core, with a full DIF/VIF/VIFE record dump instead of built-in per-meter drivers.
 
 > [!NOTE]
-> **Project Status:** Early stage. Wireless C1 Format A is hardware-validated against a real WaterStarM
-> water meter, over CC1101, SX126x, and SX127x; wired M-Bus is validated over the same meter's optical
-> (infrared) interface. Everything else (C1 Format B, T1, the two-wire bus) is implemented but not yet
-> validated against real hardware — see
+> **Project Status:** Early stage. Wireless C1 Format A with security modes 5 and 7 is hardware-validated
+> against a real WaterStarM water meter, over CC1101, SX126x, and SX127x; wired M-Bus is validated over the
+> same meter's optical (infrared) interface. Everything else (C1 Format B, compact frames, the two-wire
+> bus) is implemented but not yet validated against real hardware — see
 > [Supported Transports](#supported-transports--validation-status) below.
 
 > [!TIP]
@@ -62,12 +62,30 @@ implemented doesn't vary by chip — only what's actually been validated against
 | wM-Bus mode/format | Validated against real hardware |
 |---|---|
 | C1 Format A | Yes — WaterStarM water meter, on all three radios |
-| C1 Format B | No — host-side/synthetic test vectors only |
-| T1 | No — host-side/synthetic test vectors only |
+| C1 Format B | No — host-side test vectors only |
+| T1 | Yes — WaterStarM water meter, on SX127x |
 
 SX126x is additionally hardware-capped at 255 bytes on the air interface — fine for most C1 telegrams,
 but likely not enough for T1 (3-of-6 encoding inflates the on-air size). CC1101 and SX127x have no such
 cap.
+
+### Security and Application Layer
+
+Decryption and the application layer are the same for every transport:
+
+| Feature | Validated against real hardware |
+|---|---|
+| Security mode 5 (AES-128 CBC), short header | Yes — WaterStarM water meter, on all three radios |
+| Security mode 7 (AES-128 CBC with key derivation, authenticated by the AFL) | Yes — WaterStarM water meter (OMS 4), on all three radios |
+| Security modes 5 and 7 behind a long header, partial encryption | No — host-side test vectors only |
+| Encrypted Extended Link Layer (AES-128 counter mode) | No — host-side test vectors only |
+| Compact frames (`compact_frames: true`) | No — host-side test vectors only |
+
+With an `encryption_key`, a datagram is only read if it is encrypted, or in mode 7 at least authenticated,
+with that key; unprotected data from the same meter is ignored. The one exception is an application error
+(CI `6Eh`, `6Fh`, `70h`): it is accepted unencrypted and reported as `application error`. This follows the
+M-Bus standard (EN 13757-7), which has the meter answer in plain text after a security error. Such a
+datagram carries no meter values. Without an `encryption_key`, no AES code is built into the firmware.
 
 ### Wired / Other
 
@@ -135,7 +153,8 @@ mbus:
     radio_cc1101_id: cc1101_radio
     dump_records: true
     # meter_id: 0x12345678  # optional: only process frames from this meter's serial number
-    # encryption_key: !secret meter_aes_key  # for encrypted (mode 5) meters
+    # encryption_key: !secret meter_aes_key  # for encrypted (mode 5 or mode 7) meters
+    # compact_frames: true  # optional: read compact frames, needs meter_id on a radio
 
 sensor:
   - platform: mbus
@@ -143,7 +162,6 @@ sensor:
     name: "Total water consumption"
     dif: 0x04
     vif: 0x13
-    function: instantaneous
     unit_of_measurement: "m³"
     device_class: water
     state_class: total_increasing
@@ -155,12 +173,18 @@ sensor:
 Instead of `radio_cc1101_id`, you can use `radio_sx126x_id` or `radio_sx127x_id` with a configured
 `sx126x`/`sx127x` radio component.
 
+Some meters (Kamstrup and others) send most of their data as compact frames: the record headers come once
+in a full frame, and the following datagrams carry the values only. `compact_frames: true` reads them
+once a full frame has been seen. On a radio this needs `meter_id`, because the learned format belongs to
+one meter.
+
 ### Wired M-Bus Example
 
 Wired M-Bus over UART works the same way, just with a different source and no radio-specific settings.
 The meter is addressed either by `secondary_address` or by `primary_address` (`0`-`250`, or `254` if it
-is the only meter on the bus); `update_interval` controls how often it's polled (defaults to `60s`). The
-UART has to be set to 8 data bits, even parity and 1 stop bit:
+is the only meter on the bus); `update_interval` controls how often it's polled (defaults to `60s`). If
+the meter announces more datagrams, up to `max_datagrams` of them are read per readout (defaults to `8`).
+The UART has to be set to 8 data bits, even parity and 1 stop bit:
 
 ```yaml
 uart:
@@ -213,6 +237,64 @@ button:
       - mbus.request_ud2: water_meter
 ```
 
+### Automations
+
+`on_receive` on an `mbus:` instance fires for every valid datagram the instance accepts, after the
+entities have been updated: with a `meter_id`, or on a wired link, only those of its meter, otherwise
+those of every meter in range.
+
+```yaml
+mbus:
+  - id: water_meter
+    radio_cc1101_id: cc1101_radio
+    on_receive:
+      - lambda: |-
+          ESP_LOGI("main", "%s, CI=0x%02X, %u bytes, rssi=%.0f", LOG_STR_ARG(mbus::mbus_result_to_str(result)),
+                   ci, (unsigned) x.size(), rssi);
+```
+
+The wired actions `mbus.send_nke`, `mbus.request_ud2` and `mbus.send_ud` take `on_success` and `on_error`,
+and `max_retries` (default `2`, for `mbus.send_ud` `0`). `mbus.request_ud2` with `parse_records: false`
+decrypts the answer without reading it as records.
+
+```yaml
+button:
+  - platform: template
+    name: "Read meter"
+    on_press:
+      - mbus.request_ud2:
+          id: water_meter
+          on_success:
+            - logger.log: "Meter read"
+          on_error:
+            - lambda: |-
+                ESP_LOGW("main", "Readout failed: %s", LOG_STR_ARG(mbus::mbus_result_to_str(result)));
+```
+
+All three handlers have the same variables:
+
+| Variable | Content |
+|---|---|
+| `result` | what became of the datagram or the exchange (`mbus::MBusResult`), see below |
+| `ci` | the CI field that `data` belongs to; `0` without a datagram |
+| `x` | the datagram as received: on a radio from the L field on without CRCs, on a wired link as on the wire |
+| `data` | everything behind the last header that could be read |
+
+`on_receive` also has `rssi`, `freq_offset` and `lqi` as `float`, `NAN` where the source has no such value.
+`mbus::manufacturer_data(data)` and `mbus::application_error_code(data)` help with `data`.
+
+| `result` | Meaning | `on_receive` | Action |
+|---|---|---|---|
+| `ok` | read as requested; `data` is plain application data | yes | `on_success` |
+| `ack` | the meter acknowledged with a single character | yes | `on_success` |
+| `security error` | not decrypted or not verified: no key, wrong key, wrong MAC, unprotected data although a key is set | yes | `on_error` |
+| `not decoded` | plain data that was not read, or not to its end: CI field not implemented, compact frame with an unknown format | yes | `on_error` |
+| `application error` | the meter reports an error; `data` holds its error bytes | yes | `on_error` |
+| `invalid response` | a valid datagram that is not the expected answer, or an invalid one | first case only | `on_error` |
+| `no response` | the meter did not answer | no | `on_error` |
+| `busy` | the instance or its UART is in use | no | `on_error` |
+| `invalid request` | the datagram cannot be sent | no | `on_error` |
+
 ### Complete Examples: WaterStarM Water Meter
 
 [`watermeter-waterstarm-cc1101.yaml`](watermeter-waterstarm-cc1101.yaml),
@@ -251,12 +333,11 @@ Illustrative example, in the shape the real log lines take, for the WaterStarM m
 `DWZ`) this component was first validated against:
 
 ```text
-[D][mbus:047]: Received mode C frame with format A: bytes=194 expected=194 l=169 rssi=-80 lqi=51 dFreq=80933
-[D][mbus:080]: Block-1: L=169 C=0x44 M=DWZ ID=0x12345678 Version=0x02 DevType=0x07
-[D][mbus:083]: CRC: OK, stripped frame bytes=170
-[D][mbus:157]: AppHeader: CI=0x7A AccessNr=189 Status=0x00 Config=0x9025 EncMode=5 EncBlocks=9 Encrypted=yes
-[D][mbus:167]: Encrypted payload: offset=15 bytes=144
-[D][mbus:191]: Decryption: OK, decrypted payload bytes=144
+[D][mbus:034]: Received mode C format A frame: bytes=219 expected=219 L=190 rssi=-67 lqi=0 freq_offset=-3174, CRC ok
+[D][mbus:164]: Link: C=0x44 (SND-NR) M=DWZ ID=0x12345678 Version=0x02 DevType=0x07
+[D][mbus:497]: Layers: ELL CI=0x8C, AFL FCL=0x2C00 AuthType=5 Counter=543 MacBytes=8
+[D][mbus:237]: Header: CI=0x7A AccessNr=43 Status=0x00 Config=0x0790 Mode=7 EncryptedBytes=144
+[D][mbus:328]: Security: mode 7, MAC ok, decryption ok
 [D][mbus:118]: Record: dif=0x04 vif=0x13 storage=0 tariff=0 subunit=0 function=instantaneous pos=8 vif_raw=0x13 dife=[] vife=[] data_type=int32 raw=A7.BF.01.00 raw_value=114599; decoded: scale=0.001 unit=m3 value=114.599
 [D][mbus:118]: Record: dif=0x44 vif=0x13 storage=1 tariff=0 subunit=0 function=instantaneous pos=14 vif_raw=0x13 dife=[] vife=[0x3C] data_type=int32 raw=0C.00.00.00 flags=backward_flow raw_value=12; decoded: scale=0.001 unit=m3 value=0.012
 [D][mbus:118]: Record: dif=0x04 vif=0x6D storage=0 tariff=0 subunit=0 function=instantaneous pos=20 vif_raw=0x6D dife=[] vife=[] data_type=datetime_type_f raw=1E.0E.0F.33; decoded: value=2024-03-15T14:30
@@ -272,7 +353,6 @@ sensor:
     name: "Total water consumption"
     dif: 0x04
     vif: 0x13
-    function: instantaneous
     unit_of_measurement: "m³"
     device_class: water
     state_class: total_increasing
@@ -292,16 +372,16 @@ binary_sensor:
     dif: 0x02
     vif: 0x7D
     vif_ext: 0x7D17
-    function: instantaneous
     bit: 4
     device_class: battery
 ```
 
 ### Matching rules
 
-- `dif`, `vif` and `function` are always compared and must match exactly. `function` defaults to
-  `instantaneous` if you don't set it, so there's no wildcard for it — set it explicitly if a record uses
-  `maximum`, `minimum`, or `value_during_error`.
+- `dif` and `vif` are always compared and must match exactly.
+- `function` (`instantaneous`, `maximum`, `minimum`, `value_during_error`) and the lowest bit of `storage`
+  are already part of the `dif`, so neither is ever needed to tell two records apart. You may still set
+  them; a value that contradicts the `dif` is rejected when the configuration is validated.
 - `vif_ext`, `storage`, `tariff`, `subunit` and `vife` are optional. If you **set** one in YAML, the
   record's value for it must match exactly. If you **leave it unset**, it's ignored — the entity matches
   regardless of that field's value in the record.
@@ -314,16 +394,18 @@ binary_sensor:
 
 - No meter-, manufacturer-, or model-specific drivers, by design — see [Design
   Philosophy](#design-philosophy) above.
-- C1 Format B and T1 need real captured regression fixtures; currently only validated with synthetic/
-  standards-derived test vectors.
+- C1 Format B, compact frames, the encrypted Extended Link Layer and security modes 5 and 7 behind a long
+  header have only run against test vectors, not against a real meter.
+- Not implemented: a fragmented AFL, compact frames with partial encryption, format frames and alarm
+  datagrams.
 - SX126x is hardware-capped at 255 bytes on the air interface — enough for most C1 telegrams, but not
   necessarily for longer ones or T1 (3-of-6 encoding inflates the on-air size). This is a hardware limit,
   not a missing patch — there's no workaround.
 - Wired M-Bus is only hardware-validated over the optical interface of one meter. Addressing by
   `secondary_address`, several meters on one bus and multi-telegram readouts have only run against a
   simulated meter so far.
-- Wired M-Bus decodes the variable data structure only; encrypted data and the fixed data structure
-  aren't supported there, and there is no search for unknown meters on the bus.
+- Wired M-Bus decodes the variable data structure only; the fixed data structure isn't supported, and
+  there is no search for unknown meters on the bus.
 - TCP transport is only a conceptual placeholder in the architecture; it's not committed to being
   implemented, by the maintainer or anyone else.
 

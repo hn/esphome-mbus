@@ -35,19 +35,14 @@ inline uint16_t crc16_en13757(const uint8_t *data, size_t length) {
   return ~crc;
 }
 
-// Frame format B: the L field counts all bytes behind it including the CRCs; frames of up to 128 bytes have
-// one CRC, longer ones a second CRC over the optional block (EN 13757-4:2019, 12.4, Tables 30 to 32, 12.5.3)
+// Frame format B: the L field counts all bytes behind it including the CRCs. Frames of up to 128 bytes have
+// one CRC, frames of 131 to 256 bytes a second CRC over the optional block; 129 and 130 bytes do not exist
+// (EN 13757-4:2019, 12.4, Tables 30 to 32, 12.5.3). The shortest frame holds the first block, the CI and a CRC.
 inline size_t packet_len_frame_b(uint8_t l_field) {
-  if (l_field < 12) {
+  if (l_field < 12 || l_field == 128 || l_field == 129) {
     return 0;
   }
-  if (l_field <= 127) {
-    return 1 + l_field + 2;
-  }
-  if (l_field >= 129) {
-    return 128 + (l_field - 129) + 2;
-  }
-  return 128;
+  return static_cast<size_t>(l_field) + 1;
 }
 
 // Frame format A: the L field does not count the CRCs. The first block has 10 bytes, the others 16, the last
@@ -103,11 +98,11 @@ inline bool strip_frame_a_crcs(const uint8_t *data, size_t length, std::vector<u
   return true;
 }
 
-// Format B has one CRC for frames up to 128 bytes and two CRCs for longer
-// frames. The L field is updated after CRC removal for long frames.
+// Format B has one CRC for frames up to 128 bytes and two CRCs for longer frames. The L field of the result
+// counts the bytes behind it without the CRCs, as in format A.
 inline bool strip_frame_b_crcs(const uint8_t *data, size_t length, std::vector<uint8_t> *out,
                                uint8_t *failed_block = nullptr) {
-  if (length < 12) {
+  if (length < 13 || length == 129 || length == 130) {
     if (failed_block != nullptr) {
       *failed_block = 1;
     }
@@ -268,6 +263,48 @@ inline int32_t expected_packet_length(const std::vector<uint8_t> &x) {
     return -1;
   }
   return static_cast<int32_t>(encoded_size_3of6(body_length));
+}
+
+// True if one of the addresses of a datagram without CRCs carries this identification number: the one of the
+// link layer, the second address of an Extended Link Layer (CI 8Eh, 8Fh; EN 13757-4:2019, 13.2) or the one of
+// a long transport header (EN 13757-7:2018, 7.4), which is the meter behind a radio adapter. Layers behind an
+// encrypted Extended Link Layer cannot be looked at.
+inline bool has_meter_id(const uint8_t *frame, size_t length, uint32_t meter_id) {
+  auto id_at = [frame, length, meter_id](size_t pos) {
+    return pos + 4 <= length &&
+           (static_cast<uint32_t>(frame[pos]) | static_cast<uint32_t>(frame[pos + 1]) << 8 |
+            static_cast<uint32_t>(frame[pos + 2]) << 16 | static_cast<uint32_t>(frame[pos + 3]) << 24) == meter_id;
+  };
+  // L, C, manufacturer, then the identification number
+  if (id_at(4)) {
+    return true;
+  }
+  size_t pos = 10;
+  while (pos < length) {
+    const uint8_t ci = frame[pos];
+    if (ci >= 0x8C && ci <= 0x8F) {
+      static constexpr uint8_t ELL_LENGTH[] = {2, 8, 10, 16};
+      const size_t layer = ELL_LENGTH[ci - 0x8C];
+      // 8Eh and 8Fh: CC, ACC, manufacturer, then the second address
+      if (ci >= 0x8E && id_at(pos + 5)) {
+        return true;
+      }
+      // 8Dh and 8Fh end with the session number, whose top bits announce encryption, and the payload CRC
+      if ((ci & 0x01) != 0 && (pos + layer >= length || (frame[pos + layer - 2] >> 5) != 0)) {
+        return false;
+      }
+      pos += 1 + layer;
+    } else if (ci == 0x90) {
+      if (pos + 1 >= length) {
+        return false;
+      }
+      pos += 2 + frame[pos + 1];
+    } else {
+      // CI fields with a long header: it starts with the identification number
+      return (ci == 0x72 || ci == 0x73 || ci == 0x6F || ci == 0x75) && id_at(pos + 1);
+    }
+  }
+  return false;
 }
 
 }  // namespace esphome::mbus::wmbus_frame_codec
